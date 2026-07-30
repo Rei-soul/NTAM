@@ -18,6 +18,7 @@ import pandas as pd
 import os
 import gc
 import shutil
+import glob
 from collections import defaultdict, OrderedDict
 from config import *
 
@@ -28,7 +29,21 @@ NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
 
+# 基于 analyze_smart.py 分析结果精简：
+# 剔除 20 列 100% NaN + n_1 (73.2% NaN)，保留 30 列 (30/3=10 整除 NUM_HEADS)
 N_COLS = [f"n_{sid}" for sid in [
+    5, 9, 12,
+    170, 171, 172, 173, 174, 175,
+    177,
+    180, 181, 182, 183, 184,
+    187, 188,
+    190, 192, 194, 195, 196, 197, 198, 199,
+    206,
+    232, 233, 241, 242
+]]
+
+# 旧 feat_day 文件中原始列顺序（51列），用于读旧文件时按列索引切片
+OLD_N_COLS = [f"n_{sid}" for sid in [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
     170, 171, 172, 173, 174, 175,
     177, 180, 181, 182, 183, 184, 187, 188, 189,
@@ -36,6 +51,8 @@ N_COLS = [f"n_{sid}" for sid in [
     199, 200, 204, 205, 206, 207, 211,
     232, 233, 240, 241, 242, 244, 245
 ]]
+# 列索引映射：新 N_COLS 各列在旧文件中的位置
+_COL_IDX_MAP = [OLD_N_COLS.index(c) for c in N_COLS]
 
 RNG = np.random.RandomState(42)
 
@@ -124,7 +141,7 @@ def _get_all_pids(disk_info):
 
     n_all = len(all_pids)
     n_fail = len(fail_pids)
-
+    # 默认下MAX_DISKS=0,是全量模式
     if MAX_DISKS > 0 and n_all > MAX_DISKS:
         n_healthy_sample = max(0, MAX_DISKS - n_fail)
         RNG.shuffle(healthy_pids)
@@ -233,12 +250,14 @@ class FeatStore:
     """
     按需加载按天分片的特征文件，使用 OrderedDict 实现 O(1) LRU 缓存。
     替代原来的 feat_tensor[pid_idx, date_indices, :] 三维索引。
+    支持 col_idx_map：当旧 feat_day 维度（如51）大于 FEAT_DIM（30）时自动切片。
     """
-    def __init__(self, feat_files, pid_to_extract_idx, max_cache=30):
+    def __init__(self, feat_files, pid_to_extract_idx, max_cache=30, col_idx_map=None):
         self.feat_files = feat_files
         self.pid_to_extract_idx = pid_to_extract_idx
         self.cache = OrderedDict()   # LRU: 最近使用的在末尾
         self.max_cache = max_cache
+        self.col_idx_map = col_idx_map  # None 表示不需要切片
 
     def get(self, pid, date_indices):
         """获取某盘在 date_indices 上的特征序列。返回 (len(date_indices), FEAT_DIM) 或 None"""
@@ -248,7 +267,10 @@ class FeatStore:
         res = []
         for di in date_indices:
             arr = self._load_day(di)
-            res.append(arr[idx])
+            row = arr[idx]
+            if self.col_idx_map is not None:
+                row = row[self.col_idx_map]  # (51,) → (30,)
+            res.append(row)
         return np.stack(res, axis=0)
 
     def _load_day(self, di):
@@ -271,89 +293,110 @@ class FeatStore:
 # ============================================================
 
 def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
-                                extract_pids, pid_to_extract_idx, feat_files):
-    windows = _build_window_list(dates)
-    print(f"  窗口数: {len(windows)} (训练截止: {TRAIN_CUTOFF})")
+                                extract_pids, pid_to_extract_idx, feat_files,
+                                col_idx_map=None):
+    """
+    论文 per-disk 锚定方式生成样本（非滑动窗口扫描）。
 
-    feat_store = FeatStore(feat_files, pid_to_extract_idx, max_cache=30)
+    故障盘（训练）: failure_time 前 l=1..L 天为窗口结束日，取前 h 天 → L 条正样本
+    故障盘（测试）: failure_time 前 l=1..TEST_LEAD_TIME 内随机选 1 天 → 1 条正样本
+    健康盘:       从合法窗口中随机选 1 条负样本
 
-    # ====== 第一遍扫描：per-disk 收集候选窗口 ======
-    print("  第一遍扫描：收集候选窗口（per-disk）...")
-    train_pos_candidates = defaultdict(list)
-    test_pos_candidates = defaultdict(list)
-    train_neg_candidates = defaultdict(list)
-    test_neg_candidates = defaultdict(list)
+    col_idx_map: 若不为 None，FeatStore 读取旧文件后按此索引切片
+    """
+    n_dates = len(dates)
+    # date_str → date_index，用于 failure_time 快速查找
+    date_to_di = {d: i for i, d in enumerate(dates)}
+    # 训练/测试可用的窗口结束日索引列表
+    train_end_di_list = [i for i, d in enumerate(dates)
+                         if i >= SEQ_LEN - 1 and d <= TRAIN_CUTOFF]
+    test_end_di_list = [i for i, d in enumerate(dates)
+                        if i >= SEQ_LEN - 1 and d > TRAIN_CUTOFF]
 
-    for wi, (w_end, w_idx, date_str) in enumerate(windows):
-        window_end_dt = pd.to_datetime(date_str, format="%Y%m%d")
-        is_train = date_str <= TRAIN_CUTOFF
+    print(f"  日期数: {n_dates} | 训练窗口池: {len(train_end_di_list)} | 测试窗口池: {len(test_end_di_list)}")
 
-        for pi, pid in enumerate(sampled_pids):
-            # 检查盘是否在提取清单中（不访问 feat 数据）
-            if pid not in pid_to_extract_idx:
-                continue
+    feat_store = FeatStore(feat_files, pid_to_extract_idx, max_cache=30, col_idx_map=col_idx_map)
 
-            info = disk_info[pid]
-
-            if info['is_failure'] and info['failure_time'] is not None:
-                days = (info['failure_time'] - window_end_dt).days
-                if is_train:
-                    if 1 <= days <= L:
-                        train_pos_candidates[pi].append((wi, pi, 1.0))
-                else:
-                    if 1 <= days <= TEST_LEAD_TIME:
-                        test_pos_candidates[pi].append((wi, pi, 1.0))
-            else:
-                if is_train:
-                    train_neg_candidates[pi].append((wi, pi, 0.0))
-                else:
-                    test_neg_candidates[pi].append((wi, pi, 0.0))
-
-    # ====== 第二遍：per-disk 随机选取 ======
-    print("  第二遍：per-disk 随机选取...")
-
-    train_pos_entries = []
-    for pi, cands in train_pos_candidates.items():
-        train_pos_entries.extend(cands)
-
-    test_pos_entries = []
-    for pi, cands in test_pos_candidates.items():
-        chosen = cands[RNG.randint(0, len(cands))]
-        test_pos_entries.append(chosen)
-
+    # ====== Per-disk 生成样本 ======
+    print("  Per-disk 锚定生成样本...")
+    train_pos_entries = []   # (w_idx_list, pi, label)
     train_neg_entries = []
-    for pi, cands in train_neg_candidates.items():
-        chosen = cands[RNG.randint(0, len(cands))]
-        train_neg_entries.append(chosen)
-
+    test_pos_entries = []
     test_neg_entries = []
-    for pi, cands in test_neg_candidates.items():
-        chosen = cands[RNG.randint(0, len(cands))]
-        test_neg_entries.append(chosen)
+
+    n_fail_disks = 0
+    n_healthy_disks = 0
+
+    for pi, pid in enumerate(sampled_pids):
+        if pid not in pid_to_extract_idx:
+            continue
+
+        info = disk_info[pid]
+
+        if info['is_failure'] and info['failure_time'] is not None:
+            n_fail_disks += 1
+            ft_str = info['failure_time'].strftime("%Y%m%d")
+            ft_di = date_to_di.get(ft_str)
+            if ft_di is None:
+                continue  # failure_time 不在数据日期范围内
+
+            # === 训练集 TPS: l = 1..L ===
+            for l in range(1, L + 1):
+                end_di = ft_di - l
+                if end_di < SEQ_LEN - 1:
+                    break  # 窗口太小
+                if dates[end_di] <= TRAIN_CUTOFF:
+                    w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                    train_pos_entries.append((w_idx, pi, 1.0))
+
+            # === 测试集: l=1..TEST_LEAD_TIME 中随机选 1 条 ===
+            test_cands = []
+            for l in range(1, TEST_LEAD_TIME + 1):
+                end_di = ft_di - l
+                if end_di < SEQ_LEN - 1:
+                    break
+                if dates[end_di] > TRAIN_CUTOFF:
+                    w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                    test_cands.append(w_idx)
+            if test_cands:
+                chosen = test_cands[RNG.randint(0, len(test_cands))]
+                test_pos_entries.append((chosen, pi, 1.0))
+        else:
+            # === 健康盘：训练/测试各随机选 1 条负样本 ===
+            n_healthy_disks += 1
+
+            if train_end_di_list:
+                end_di = train_end_di_list[RNG.randint(0, len(train_end_di_list))]
+                w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                train_neg_entries.append((w_idx, pi, 0.0))
+
+            if test_end_di_list:
+                end_di = test_end_di_list[RNG.randint(0, len(test_end_di_list))]
+                w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                test_neg_entries.append((w_idx, pi, 0.0))
 
     n_train_pos = len(train_pos_entries)
     n_train_neg = len(train_neg_entries)
     n_test_pos = len(test_pos_entries)
     n_test_neg = len(test_neg_entries)
 
-    n_fail_disks = len(train_pos_candidates)
-    n_healthy_disks = len(train_neg_candidates)
     print(f"  故障盘: {n_fail_disks:,} | 健康盘: {n_healthy_disks:,}")
     print(f"  训练集: 正 {n_train_pos:,} (TPS L={L}) | 负 {n_train_neg:,} "
           f"| 正负比 1:{n_train_neg / max(n_train_pos, 1):.0f}")
     print(f"  测试集: 正 {n_test_pos:,} (每盘 1 条) | 负 {n_test_neg:,} "
           f"| 正负比 1:{n_test_neg / max(n_test_pos, 1):.0f}")
 
-    # ====== 训练集：合并 + 打乱 ======
+    # ====== 合并 + 按窗口排序（利用 FeatStore 缓存局部性，大幅加速分片保存） ======
     print(f"\n  训练集: 正样本全保留（TPS L={L}），负样本每盘 1 条")
     train_selected = train_pos_entries + train_neg_entries
-    RNG.shuffle(train_selected)
+    # 按窗口起始日索引排序，让同一窗口/相邻窗口的样本聚在一起
+    # 注意：不打乱！DataLoader 在加载时会 shuffle，不需要在分片层面打乱
+    train_selected.sort(key=lambda x: x[0][0])
     n_train_final = len(train_selected)
     print(f"  训练样本总计: {n_train_final:,} (正: {n_train_pos:,}, 负: {n_train_neg:,})")
 
-    # ====== 测试集：全量保留 ======
     test_all = test_pos_entries + test_neg_entries
-    RNG.shuffle(test_all)
+    test_all.sort(key=lambda x: x[0][0])
     if MAX_TEST_SAMPLES > 0 and len(test_all) > MAX_TEST_SAMPLES:
         test_selected = test_all[:MAX_TEST_SAMPLES]
         n_test_final = len(test_selected)
@@ -365,10 +408,9 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
         n_test_pos_final = n_test_pos
         print(f"\n  测试集: 全量保留 {n_test_final:,} (正: {n_test_pos_final})")
 
-    # ====== 辅助函数 === ==
-    def _copy_sample(wi, pi, label, s_tgt, n_tgt, m_tgt, l_tgt, counter):
+    # ====== 辅助函数：entry 现在用 w_idx (日期索引列表) 替代 wi (窗口索引) ======
+    def _copy_sample(w_idx, pi, label, s_tgt, n_tgt, m_tgt, l_tgt, counter):
         pid = sampled_pids[pi]
-        w_end, w_idx, date_str = windows[wi]
 
         disk_seq = feat_store.get(pid, w_idx)
         if disk_seq is None:
@@ -392,8 +434,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
         l_tgt[counter] = label
         return counter + 1
 
-    def _save_shards(source_indices, shard_pattern, n_shards, label_prefix):
-        n_total = len(source_indices)
+    def _save_shards(source_entries, shard_pattern, n_shards, label_prefix):
+        n_total = len(source_entries)
         if n_total == 0:
             print(f"    {label_prefix}: 0 样本，跳过")
             return 0
@@ -402,7 +444,7 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
         n_actual = min(n_shards, (n_total + shard_size - 1) // shard_size)
 
         shard_groups = [[] for _ in range(n_actual)]
-        for idx, item in enumerate(source_indices):
+        for idx, item in enumerate(source_entries):
             s = idx // shard_size
             if s >= n_actual:
                 s = n_actual - 1
@@ -424,8 +466,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
             l_tmp = np.memmap(tmp_prefix + '.l.tmp', dtype=np.float32, mode='w+',
                               shape=(n_shard, 1))
 
-            for j, (wi, pi, label) in enumerate(group):
-                _copy_sample(wi, pi, label, s_tmp, n_tmp, m_tmp, l_tmp, j)
+            for j, (w_idx, pi, label) in enumerate(group):
+                _copy_sample(w_idx, pi, label, s_tmp, n_tmp, m_tmp, l_tmp, j)
 
             np.savez_compressed(shard_pattern.format(s),
                                 s=np.array(s_tmp[:n_shard]),
@@ -475,12 +517,43 @@ def build_and_save_samples():
     neighbor_map = _load_neighbor_map(disk_info)
     sampled_pids = _get_all_pids(disk_info)
 
-    dates, extract_pids, pid_to_extract_idx, feat_files = _extract_and_build_feat(
-        disk_info, sampled_pids, neighbor_map)
+    # 检测 feat_day 文件是否已存在
+    feat_day_files = sorted(glob.glob(os.path.join(PROCESSED_DIR, "feat_day_*.npy")))
+
+    col_idx_map = None  # 默认不需要切片
+
+    if feat_day_files:
+        # 已有按天分片文件，检测维度是否需要切片
+        sample_arr = np.load(feat_day_files[0], mmap_mode='r')
+        disk_dim = sample_arr.shape[1]
+        del sample_arr
+
+        if disk_dim == len(OLD_N_COLS) and disk_dim != FEAT_DIM:
+            col_idx_map = _COL_IDX_MAP
+            print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy (51维)")
+            print(f"  将按 COL_IDX_MAP 切片为 {FEAT_DIM} 维，跳过特征提取")
+        else:
+            print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy ({disk_dim}维)，跳过特征提取")
+
+        dates, _ = _scan_csv_dates()
+        # 重建 pid_to_extract_idx（与 _extract_and_build_feat 中 sorted(all_needed) 一致）
+        all_needed = set(sampled_pids)
+        for pid in sampled_pids:
+            all_needed.update(neighbor_map.get(pid, [])[:MAX_NEIGHBORS])
+        extract_pids = sorted(all_needed)
+        pid_to_extract_idx = {pid: i for i, pid in enumerate(extract_pids)}
+        npy_date_count = len(feat_day_files)
+        if npy_date_count != len(dates):
+            print(f"  ⚠️ 警告: feat_day 文件数 ({npy_date_count}) 与日期数 ({len(dates)}) 不一致")
+            print(f"     将使用 feat_day 文件数限制样本生成的日期范围")
+            dates = dates[:npy_date_count]
+    else:
+        dates, extract_pids, pid_to_extract_idx, feat_day_files = _extract_and_build_feat(
+            disk_info, sampled_pids, neighbor_map)
 
     n_train, n_test = _generate_and_save_samples(
         dates, disk_info, sampled_pids, neighbor_map,
-        extract_pids, pid_to_extract_idx, feat_files)
+        extract_pids, pid_to_extract_idx, feat_day_files, col_idx_map)
 
     print("=" * 60)
     return n_train, n_test
