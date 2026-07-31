@@ -80,7 +80,7 @@ class TemporalEncoder(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=feat_dim,
             nhead=nhead,
-            dim_feedforward=feat_dim * 4,   # 论文通常用 4倍
+            dim_feedforward=feat_dim * 8,   # 加宽FFN (4x→8x) 提升模型容量
             dropout=dropout,
             activation='relu',
             batch_first=True               # 让输入变成 [B, T, F]

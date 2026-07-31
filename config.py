@@ -10,7 +10,6 @@ x8981;__&#x624B;动删除旧分&#x7247;__&#x518D;
 DATA_MONTH_START = 1     # 起始月份（1~12）
 DATA_MONTH_END = 12       # 结束月份（1~12，验证测试用1~2月数据）
 TRAIN_CUTOFF = "20181115"  # 训练/测试分割日期（<=此日期为训练集，>为测试集）
-POS_NEG_RATIO = 3           # 训练/测试集正负样本比例（负样本数 = 正样本数 × POS_NEG_RATIO）
 MAX_DISKS = 0                # 参与实验的磁盘上限（0=全量）；故障盘全保留，健康盘随机采样补齐
 
 
@@ -24,8 +23,8 @@ SEQ_LEN = 15             # 时间步长 h（15天窗口，捕获时序退化）
 MAX_NEIGHBORS = 5        # 最大邻居数量 M
 
 # ========== 模型结构 ==========
-TRANSFORMER_LAYERS = 3   # Transformer编码器层数（提升模型容量）
-NUM_HEADS = 3            # 多头注意力头数（30/3=10，整除）
+TRANSFORMER_LAYERS = 10   # Transformer编码器层数（提升模型容量）
+NUM_HEADS =  3           # 多头注意力头数（30/3=10，整除）
 DROPOUT = 0.1            # Dropout比率
 
 # ========== 邻域组件开关 ==========
@@ -33,9 +32,11 @@ USE_NEIGHBORHOOD = True   # True=完整NTAM, False=消融实验(无邻域组件,
 
 # ========== 训练 ==========
 BATCH_SIZE = 64          # 批次大小
-LEARNING_RATE = 1e-4
-EPOCHS = 20              # 增加训练轮次（10→20），给模型更多机会学习正样本模式
-POS_WEIGHT = 11.0        # BCEWithLogitsLoss 正样本权重（训练集正负比约1:11）
+LEARNING_RATE = 1e-3
+EPOCHS = 5              # 增加训练轮次（10→20），给模型更多机会学习正样本模式
+POS_WEIGHT = 0           # 不使用正样本权重（0=关闭）
+VAL_SPLIT = 0.1          # 验证集比例（10%训练样本做早停）
+PATIENCE = 5             # 早停耐心值：验证Loss连续5个epoch不降则停止
 TRAIN_SHARDS = 50        # 恢复 10 分片（样本量增大）
 TEST_SHARDS = 50         # 测试样本增多，增加分片数降低单片内存
 MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，保持原始分布比例）

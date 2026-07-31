@@ -152,8 +152,17 @@ def train():
     if pos_weight is not None:
         print(f"  使用 pos_weight={POS_WEIGHT} (补偿训练集正负比约1:11)")
 
-    # 4. 标准 Epoch 训练（外层 epoch，内层遍历所有分片）
-    print(f"\n[2] 训练 ({EPOCHS} epochs × {n_train_shards} 分片)")
+    # 4. 训练（带验证集早停）
+    # 从训练分片中按比例分配训练/验证
+    n_val_shards = max(1, int(n_train_shards * VAL_SPLIT))
+    n_actual_train_shards = n_train_shards - n_val_shards
+    print(f"\n[2] 训练 ({EPOCHS} epochs × {n_actual_train_shards} 分片) | "
+          f"验证集: {n_val_shards} 分片 | 早停: patience={PATIENCE}")
+
+    best_val_loss = float('inf')
+    best_epoch = 0
+    patience_counter = 0
+    best_model_state = None
 
     for epoch in range(1, EPOCHS + 1):
         epoch_loss = 0.0
@@ -162,7 +171,8 @@ def train():
         print(f"\n{'─' * 50}")
         print(f"  Epoch {epoch}/{EPOCHS}")
 
-        for shard_id in range(n_train_shards):
+        # 训练（前 n_actual_train_shards 个分片）
+        for shard_id in range(n_actual_train_shards):
             train_loader = load_train_shard(shard_id)
             avg_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
             epoch_loss += avg_loss * len(train_loader.dataset)
@@ -172,14 +182,57 @@ def train():
             if DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
-        # 每个 epoch 结束后评估一次
+        # 验证（最后 n_val_shards 个分片）
+        val_loss = 0.0
+        val_correct = 0
+        val_samples = 0
+        with torch.no_grad():
+            for shard_id in range(n_actual_train_shards, n_train_shards):
+                val_loader = load_train_shard(shard_id)
+                for sf, nf, nm, lb in val_loader:
+                    sf, nf, nm, lb = sf.to(DEVICE), nf.to(DEVICE), nm.to(DEVICE), lb.to(DEVICE)
+                    prob, logits = model(sf, nf, nm)
+                    loss = criterion(logits, lb)
+                    val_loss += loss.item() * len(sf)
+                    val_correct += (prob.round() == lb).float().sum().item()
+                    val_samples += len(sf)
+                del val_loader
+                if DEVICE == "cuda":
+                    torch.cuda.empty_cache()
+        val_loss /= max(val_samples, 1)
+        val_acc = val_correct / max(val_samples, 1)
+
         epoch_loss /= max(epoch_samples, 1)
         epoch_acc = epoch_correct / max(epoch_samples, 1)
-        test_loss, test_acc, test_prec, test_rec, test_f1 = evaluate_all(model, n_test_shards, criterion, scaler)
 
-        print(f"  Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc:.4f}")
-        print(f"  Test  Loss: {test_loss:.4f} | Acc: {test_acc:.4f} | "
-              f"Prec: {test_prec:.4f} | Rec: {test_rec:.4f} | F1: {test_f1:.4f}")
+        print(f"  Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+
+        # 早停检查
+        if val_loss < best_val_loss - 1e-5:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            patience_counter = 0
+            # 保存最佳模型
+            best_model_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            print(f"    ✅ 新最佳验证Loss!")
+        else:
+            patience_counter += 1
+            print(f"    ⚠️ 验证Loss未改善 ({patience_counter}/{PATIENCE})")
+            if patience_counter >= PATIENCE:
+                print(f"\n  🛑 早停! 最佳验证Loss在第 {best_epoch} epoch (Val Loss={best_val_loss:.4f})")
+                break
+
+    # 恢复到最佳模型
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"  已恢复最佳模型 (epoch {best_epoch})")
+
+    # 用最佳模型做最终评估
+    print(f"\n  [评估] 用最佳模型评估测试集...")
+    test_loss, test_acc, test_prec, test_rec, test_f1 = evaluate_all(model, n_test_shards, criterion, scaler)
+    print(f"  最佳模型 Test  Loss: {test_loss:.4f} | Acc: {test_acc:.4f} | "
+          f"Prec: {test_prec:.4f} | Rec: {test_rec:.4f} | F1: {test_f1:.4f}")
 
     # 5. 最终评估
     print(f"\n{'=' * 60}")

@@ -29,9 +29,9 @@ NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
 
-# 基于 analyze_smart.py 分析结果精简：
-# 剔除 20 列 100% NaN + n_1 (73.2% NaN)，保留 30 列 (30/3=10 整除 NUM_HEADS)
-N_COLS = [f"n_{sid}" for sid in [
+# r_ 原始值列，经 Z-score 按 model 标准化后使用（由 build_feat_r.py 生成）
+# 30 列 (30/3=10 整除 NUM_HEADS)
+N_COLS = [f"r_{sid}" for sid in [
     5, 9, 12,
     170, 171, 172, 173, 174, 175,
     177,
@@ -41,18 +41,6 @@ N_COLS = [f"n_{sid}" for sid in [
     206,
     232, 233, 241, 242
 ]]
-
-# 旧 feat_day 文件中原始列顺序（51列），用于读旧文件时按列索引切片
-OLD_N_COLS = [f"n_{sid}" for sid in [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-    170, 171, 172, 173, 174, 175,
-    177, 180, 181, 182, 183, 184, 187, 188, 189,
-    190, 191, 192, 193, 194, 195, 196, 197, 198,
-    199, 200, 204, 205, 206, 207, 211,
-    232, 233, 240, 241, 242, 244, 245
-]]
-# 列索引映射：新 N_COLS 各列在旧文件中的位置
-_COL_IDX_MAP = [OLD_N_COLS.index(c) for c in N_COLS]
 
 RNG = np.random.RandomState(42)
 
@@ -520,20 +508,9 @@ def build_and_save_samples():
     # 检测 feat_day 文件是否已存在
     feat_day_files = sorted(glob.glob(os.path.join(PROCESSED_DIR, "feat_day_*.npy")))
 
-    col_idx_map = None  # 默认不需要切片
-
     if feat_day_files:
-        # 已有按天分片文件，检测维度是否需要切片
-        sample_arr = np.load(feat_day_files[0], mmap_mode='r')
-        disk_dim = sample_arr.shape[1]
-        del sample_arr
-
-        if disk_dim == len(OLD_N_COLS) and disk_dim != FEAT_DIM:
-            col_idx_map = _COL_IDX_MAP
-            print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy (51维)")
-            print(f"  将按 COL_IDX_MAP 切片为 {FEAT_DIM} 维，跳过特征提取")
-        else:
-            print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy ({disk_dim}维)，跳过特征提取")
+        # 已有 feat_day 文件（由 build_feat_r.py 生成），跳过特征提取
+        print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy 文件，跳过特征提取")
 
         dates, _ = _scan_csv_dates()
         # 重建 pid_to_extract_idx（与 _extract_and_build_feat 中 sorted(all_needed) 一致）
@@ -553,7 +530,7 @@ def build_and_save_samples():
 
     n_train, n_test = _generate_and_save_samples(
         dates, disk_info, sampled_pids, neighbor_map,
-        extract_pids, pid_to_extract_idx, feat_day_files, col_idx_map)
+        extract_pids, pid_to_extract_idx, feat_day_files)
 
     print("=" * 60)
     return n_train, n_test
