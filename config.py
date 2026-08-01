@@ -1,11 +1,6 @@
 # config.py
 import torch
-"""
-改了 `TRAIN_CUTOFF`、`L`、`TEST_LEAD_TIME` 等参数后需&#
-x8981;__&#x624B;动删除旧分&#x7247;__&#x518D;
-重跑，否则会复用旧分片。`feat_day` 不需要删——它只和日期范围
- + MAX_NEIGHBORS 相关。
-"""
+
 # ========== 数据范围 ==========
 DATA_MONTH_START = 1     # 起始月份（1~12）
 DATA_MONTH_END = 12       # 结束月份（1~12，验证测试用1~2月数据）
@@ -23,7 +18,7 @@ SEQ_LEN = 15             # 时间步长 h（15天窗口，捕获时序退化）
 MAX_NEIGHBORS = 5        # 最大邻居数量 M
 
 # ========== 模型结构 ==========
-TRANSFORMER_LAYERS = 10   # Transformer编码器层数（提升模型容量）
+TRANSFORMER_LAYERS = 10  # Transformer编码器层数（加深时序建模）
 NUM_HEADS =  3           # 多头注意力头数（30/3=10，整除）
 DROPOUT = 0.1            # Dropout比率
 
@@ -33,10 +28,10 @@ USE_NEIGHBORHOOD = True   # True=完整NTAM, False=消融实验(无邻域组件,
 # ========== 训练 ==========
 BATCH_SIZE = 64          # 批次大小
 LEARNING_RATE = 1e-3
-EPOCHS = 5              # 增加训练轮次（10→20），给模型更多机会学习正样本模式
+EPOCHS = 3              # 增加训练轮次（10→20），给模型更多机会学习正样本模式
 POS_WEIGHT = 0           # 不使用正样本权重（0=关闭）
 VAL_SPLIT = 0.1          # 验证集比例（10%训练样本做早停）
-PATIENCE = 5             # 早停耐心值：验证Loss连续5个epoch不降则停止
+PATIENCE = 3             # 早停耐心值：验证Loss连续5个epoch不降则停止
 TRAIN_SHARDS = 50        # 恢复 10 分片（样本量增大）
 TEST_SHARDS = 50         # 测试样本增多，增加分片数降低单片内存
 MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，保持原始分布比例）

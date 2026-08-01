@@ -44,9 +44,6 @@ def evaluate_on_shard(model, shard_id, criterion, scaler=None):
             n_pred_pos += (preds == 1.0).float().sum().item()
             n_pred_neg += (preds == 0.0).float().sum().item()
 
-    print(f"  [Shard {shard_id}] {total_samples}样本 (真实正:{int(n_pos)} 负:{int(n_neg)})"
-          f" → 预测正:{int(n_pred_pos)} 负:{int(n_pred_neg)}"
-          f" | TP:{int(tp)} FP:{int(fp)} FN:{int(fn)} TN:{int(tn)}")
     del loader
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

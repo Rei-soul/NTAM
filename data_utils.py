@@ -565,7 +565,6 @@ def load_train_shard(shard_id):
     loader = _numpy_to_dataloader(np.asarray(data['s']), np.asarray(data['n']),
                                   np.asarray(data['m']), np.asarray(data['l']),
                                   shuffle=True, batch_size=BATCH_SIZE)
-    print(f"  [Train Shard {shard_id:02d}] {n_samples} 样本, {len(loader)} batches")
     return loader
 
 
@@ -578,7 +577,6 @@ def load_test_shard(shard_id):
     loader = _numpy_to_dataloader(np.asarray(data['s']), np.asarray(data['n']),
                                   np.asarray(data['m']), np.asarray(data['l']),
                                   shuffle=False, batch_size=BATCH_SIZE * 4)
-    print(f"  [Test Shard {shard_id:02d}] {n_samples} 样本, {len(loader)} batches")
     return loader
 
 
