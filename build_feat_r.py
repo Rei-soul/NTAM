@@ -25,12 +25,20 @@ R_COLS = [f"r_{sid}" for sid in [
     206, 232, 233, 241, 242
 ]]
 
+# 厂商归一化 SMART 值（n_），与 R_COLS 一一对应，作为附加特征拼接在 Z-score(r_) 之后
+N_FEAT_COLS = [c.replace("r_", "n_") for c in R_COLS]
+
+# 特征列总布局：前 len(R_COLS) 列 = Z-score 后的 r_，后 len(N_FEAT_COLS) 列 = 厂商归一化 n_ 原值
+ALL_FEAT_COLS = R_COLS + N_FEAT_COLS
+FEAT_DIM_TOTAL = len(ALL_FEAT_COLS)   # = 60
+N_R_COLS = len(R_COLS)
+
 
 def main():
     start_guard(MEMORY_LIMIT_GB)
 
     print("=" * 70)
-    print("  r_ 原始值 Z-score 标准化")
+    print(f"  r_ Z-score + n_ 厂商归一化 特征生成 ({FEAT_DIM_TOTAL} 维)")
     print("=" * 70)
 
     csv_files = sorted([
@@ -41,8 +49,9 @@ def main():
     dates = [fname[:8] for fname in csv_files]
     date_to_file = {d: os.path.join(DATA_DIR, fname) for d, fname in zip(dates, csv_files)}
     n_dates = len(dates)
-    usecols = ['disk_id', 'model'] + R_COLS
-    n_cols = len(R_COLS)
+    # Pass 1 只统计 r_（节省内存）；Pass 2 同时读 r_ + n_
+    usecols_r = ['disk_id', 'model'] + R_COLS
+    usecols = ['disk_id', 'model'] + ALL_FEAT_COLS
 
     # ============================================================
     # Pass 1: Welford 统计
@@ -69,14 +78,14 @@ def main():
                 break
             fpath = date_to_file[date_str]
             try:
-                df = pd.read_csv(fpath, usecols=usecols)
+                df = pd.read_csv(fpath, usecols=usecols_r)
             except Exception:
                 continue
             df['model'] = df['model'].astype(str)
             df[R_COLS] = df[R_COLS].replace("", np.nan).astype(np.float32)
 
             for model_name, group in df.groupby('model'):
-                for ci in range(n_cols):
+                for ci in range(N_R_COLS):
                     vals = group[R_COLS[ci]].dropna().values
                     if len(vals) == 0:
                         continue
@@ -103,7 +112,7 @@ def main():
             stats_final[key] = {'mean': s['mean'], 'std': std, 'count': s['count']}
 
         global_stats = {}
-        for ci in range(n_cols):
+        for ci in range(N_R_COLS):
             means = [s['mean'] for (m, i), s in stats_final.items() if i == ci and s['count'] >= 10]
             global_stats[ci] = {
                 'mean': np.mean(means) if means else 0.0,
@@ -151,22 +160,22 @@ def main():
     # 预分配 feat_day
     feat_files = [os.path.join(PROCESSED_DIR, f"feat_day_{di:04d}.npy") for di in range(n_dates)]
     for fp in feat_files:
-        np.save(fp, np.zeros((n_extract, n_cols), dtype=np.float32))
+        np.save(fp, np.zeros((n_extract, FEAT_DIM_TOTAL), dtype=np.float32))
 
     # 构建向量化查找表: means/std 矩阵 (n_models, n_cols)
     all_models = sorted(set(k[0] for k in stats_final.keys()))
     model_to_midx = {m: i for i, m in enumerate(all_models)}
     n_models_total = len(all_models)
-    means_arr = np.zeros((n_models_total, n_cols), dtype=np.float32)
-    stds_arr = np.ones((n_models_total, n_cols), dtype=np.float32)
+    means_arr = np.zeros((n_models_total, N_R_COLS), dtype=np.float32)
+    stds_arr = np.ones((n_models_total, N_R_COLS), dtype=np.float32)
     for (m, ci), s in stats_final.items():
         midx = model_to_midx[m]
         if s['count'] >= 10:
             means_arr[midx, ci] = s['mean']
             stds_arr[midx, ci] = s['std']
 
-    g_means = np.array([global_stats[ci]['mean'] for ci in range(n_cols)], dtype=np.float32)
-    g_stds = np.array([global_stats[ci]['std'] for ci in range(n_cols)], dtype=np.float32)
+    g_means = np.array([global_stats[ci]['mean'] for ci in range(N_R_COLS)], dtype=np.float32)
+    g_stds = np.array([global_stats[ci]['std'] for ci in range(N_R_COLS)], dtype=np.float32)
     g_stds[g_stds < 1e-8] = 1.0
 
     print(f"  需提取盘数: {n_extract:,}, 日期数: {n_dates}, Model数: {n_models_total}")
@@ -181,7 +190,7 @@ def main():
         df['disk_id'] = df['disk_id'].astype(int)
         df['model'] = df['model'].astype(str)
         df['_pid'] = df['disk_id'].astype(str) + '_' + df['model']
-        df[R_COLS] = df[R_COLS].replace("", np.nan).astype(np.float32)
+        df[ALL_FEAT_COLS] = df[ALL_FEAT_COLS].replace("", np.nan).astype(np.float32)
 
         merged = df.merge(lookup_df[['disk_id', 'model', '_idx']], on=['disk_id', 'model'], how='inner')
         n_merged = len(merged)
@@ -190,22 +199,26 @@ def main():
         if n_merged == 0:
             continue
 
-        vals = merged[R_COLS].fillna(0).values.astype(np.float32)
+        vals = merged[R_COLS].fillna(0).values.astype(np.float32)        # r_ 原始值 → Z-score
+        n_vals = merged[N_FEAT_COLS].fillna(0).values.astype(np.float32)  # n_ 厂商归一化 → 直接拼接
         midx_arr = np.array([model_to_midx.get(m, -1) for m in merged['model'].values], dtype=np.int64)
         idx_arr = merged['_idx'].values.astype(np.int64)
 
-        # 向量化 Z-score
+        # 向量化 Z-score（仅前 N_R_COLS 列）
         valid = midx_arr >= 0
-        z_vals = np.zeros((n_merged, n_cols), dtype=np.float32)
+        z_vals = np.zeros((n_merged, FEAT_DIM_TOTAL), dtype=np.float32)
 
         if valid.sum() > 0:
             mv = midx_arr[valid]
             vv = vals[valid]
-            z_vals[valid] = np.clip((vv - means_arr[mv]) / stds_arr[mv], -5.0, 5.0)
+            z_vals[valid, :N_R_COLS] = np.clip((vv - means_arr[mv]) / stds_arr[mv], -5.0, 5.0)
 
         invalid = ~valid
         if invalid.sum() > 0:
-            z_vals[invalid] = np.clip((vals[invalid] - g_means) / g_stds, -5.0, 5.0)
+            z_vals[invalid, :N_R_COLS] = np.clip((vals[invalid] - g_means) / g_stds, -5.0, 5.0)
+
+        # 后 N_FEAT_COLS 列 = 厂商归一化 n_ 原值（不做 Z-score，保留厂商定义语义）
+        z_vals[:, N_R_COLS:] = n_vals
 
         # 写入
         day_arr = np.load(feat_files[di], mmap_mode='r+')
@@ -217,7 +230,8 @@ def main():
         if (di + 1) % 30 == 0 or di == 0:
             print(f"    [{di+1}/{n_dates}] {date_str} ({n_merged:,}条)")
 
-    print(f"\n  ✅ Z-score feat_day 文件已生成 ({n_dates} 个文件, {n_extract:,}×{n_cols})")
+    print(f"\n  ✅ feat_day 文件已生成 ({n_dates} 个文件, {n_extract:,}×{FEAT_DIM_TOTAL} = "
+          f"{N_R_COLS}×Z-score(r_) + {FEAT_DIM_TOTAL - N_R_COLS}×n_)")
     print(f"{'=' * 70}")
 
 

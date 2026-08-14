@@ -18,13 +18,13 @@ L = 5                       # TPS lead time: 每块故障盘在训练时生成 l
 TEST_LEAD_TIME = 7          # 测试时不扩增，使用固定 lead time 天数
 
 # ========== 数据维度 ==========
-FEAT_DIM = 30            # SMART特征维度（原51，剔除20列100%NaN + 1列73.2%NaN，保留30列能被NUM_HEADS整除）
+FEAT_DIM = 60            # 特征维度：30 列 Z-score(r_) + 30 列厂商归一化 n_（60/3=20 整除 NUM_HEADS）
 SEQ_LEN = 8              # 时间步长 h（8天窗口，信号分析显示故障信号集中在故障前~7天）
 MAX_NEIGHBORS = 5        # 最大邻居数量 M
 
 # ========== 模型结构 ==========
 TRANSFORMER_LAYERS = 3  # Transformer编码器层数（最佳配置：10层）
-NUM_HEADS =  3           # 多头注意力头数（30/3=10，整除）
+NUM_HEADS =  3           # 多头注意力头数（60/3=20，整除）
 DROPOUT = 0.1            # Dropout比率
 
 # ========== 邻域组件开关 ==========

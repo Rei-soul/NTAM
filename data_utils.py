@@ -29,9 +29,18 @@ NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
 
-# r_ 原始值列，经 Z-score 按 model 标准化后使用（由 build_feat_r.py 生成）
-# 30 列 (30/3=10 整除 NUM_HEADS)
+# 特征列：前 30 列为 Z-score 后的 r_（由 build_feat_r.py 生成），后 30 列为厂商归一化 n_ 原值
+# 60 列 (60/3=20 整除 NUM_HEADS)
 N_COLS = [f"r_{sid}" for sid in [
+    5, 9, 12,
+    170, 171, 172, 173, 174, 175,
+    177,
+    180, 181, 182, 183, 184,
+    187, 188,
+    190, 192, 194, 195, 196, 197, 198, 199,
+    206,
+    232, 233, 241, 242
+]] + [f"n_{sid}" for sid in [
     5, 9, 12,
     170, 171, 172, 173, 174, 175,
     177,
