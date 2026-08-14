@@ -3,6 +3,8 @@
 # 特点：每 epoch 训练完立即评估全部测试分片，打印 P/R/F1，
 #       训练结束后自动恢复到 F1 最高的 epoch 的模型
 
+import os
+import json
 import torch
 import torch.optim as optim
 import numpy as np
@@ -112,6 +114,69 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler):
     if total_samples == 0:
         return 0.0, 0.0
     return total_loss / total_samples, total_correct / total_samples
+
+
+def _extract_model_config(model):
+    """从 NTAM 模型实例提取真实结构参数（保证与保存的权重严格对应）。"""
+    enc_layer = model.temporal.transformer_encoder.layers[0]
+    # PyTorch 中 encoder_layer.dropout 是 nn.Dropout 模块（.p 为概率），旧版本可能是裸浮点，做兼容
+    dropout_val = enc_layer.dropout
+    dropout = getattr(dropout_val, 'p', dropout_val)
+    return {
+        'feat_dim': model.temporal.feat_dim,
+        'seq_len': model.seq_len,
+        'max_neighbors': model.max_neighbors,
+        'transformer_layers': len(model.temporal.transformer_encoder.layers),
+        'num_heads': enc_layer.self_attn.num_heads,
+        'dropout': dropout,
+        'use_neighborhood': model.use_neighborhood,
+    }
+
+
+def save_trained_model(model, best_record, final_metrics, epoch_records, save_dir=SAVE_DIR):
+    """训练完成后将最佳模型持久化到磁盘。
+
+    保存两部分内容:
+      1) ntam_best.pt      — 最佳模型权重(state_dict) + 重建模型所需配置 + 最终测试指标
+      2) training_log.json — 每个 epoch 的指标日志（不含权重，便于后续分析）
+
+    参数:
+        model:          已恢复到最佳 epoch 的模型实例
+        best_record:    最佳 epoch 的记录 dict（含 'epoch' 等字段）
+        final_metrics:  最佳模型的最终测试指标 dict
+        epoch_records:  所有 epoch 的记录列表
+        save_dir:       保存目录（默认取 config.SAVE_DIR）
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 1) 最佳模型完整存档：权重统一转到 CPU，方便日后在无 GPU 机器上加载
+    best_path = os.path.join(save_dir, "ntam_best.pt")
+    torch.save({
+        'model_state_dict': {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        'config': _extract_model_config(model),
+        'best_epoch': best_record['epoch'],
+        'final_metrics': final_metrics,
+    }, best_path)
+    print(f"  ✅ 最佳模型已保存: {os.path.abspath(best_path)}")
+
+    # 2) Epoch 指标日志（state_dict 不入 JSON，避免文件过大且不可序列化）
+    log_path = os.path.join(save_dir, "training_log.json")
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump({
+            'best_epoch': best_record['epoch'],
+            'final_metrics': final_metrics,
+            'epochs': [
+                {
+                    'epoch': r['epoch'],
+                    'train_loss': r['train_loss'],
+                    'test_prec': r['test_prec'],
+                    'test_rec': r['test_rec'],
+                    'test_f1': r['test_f1'],
+                }
+                for r in epoch_records
+            ],
+        }, f, indent=2, ensure_ascii=False)
+    print(f"  ✅ Epoch 训练日志已保存: {os.path.abspath(log_path)}")
 
 
 def train():
@@ -229,6 +294,21 @@ def train():
           f"TRAIN_SHARDS={n_train_shards} | TEST_SHARDS={n_test_shards}")
     print("=" * 60)
     print("✓ 训练完成!")
+
+    # 8. 保存训练好的模型到磁盘
+    print(f"\n  [保存] 持久化最佳模型 → {SAVE_DIR}/ ...")
+    save_trained_model(
+        model,
+        best_record,
+        {
+            'test_loss': final_test_loss,
+            'test_acc': final_test_acc,
+            'precision': final_prec,
+            'recall': final_rec,
+            'f1': final_f1,
+        },
+        epoch_records,
+    )
 
 
 if __name__ == "__main__":

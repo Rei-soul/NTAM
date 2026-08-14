@@ -44,3 +44,6 @@ MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，�
 USE_AMP = False          # 关闭混合精度
 MEMORY_LIMIT_GB = 8      # 内存看门狗阈值（GB），超过此值自动终止进程防止死机
 DEVICE = "cuda"
+
+# ========== 模型保存 ==========
+SAVE_DIR = "saved_models"  # 训练完成后保存最佳模型与训练日志的目录（相对当前工作目录）
