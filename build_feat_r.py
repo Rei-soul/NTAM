@@ -65,8 +65,8 @@ def main():
         stats = {}
         train_count = 0
         for di, date_str in enumerate(dates):
-            if date_str > TRAIN_CUTOFF:
-                break
+            if not (TRAIN_START <= date_str <= TRAIN_END):
+                continue
             fpath = date_to_file[date_str]
             try:
                 df = pd.read_csv(fpath, usecols=usecols)

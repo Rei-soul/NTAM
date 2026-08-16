@@ -297,11 +297,13 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
     date_to_di = {d: i for i, d in enumerate(dates)}
     # 训练/测试可用的窗口结束日索引列表
     train_end_di_list = [i for i, d in enumerate(dates)
-                         if i >= SEQ_LEN - 1 and d <= TRAIN_CUTOFF]
+                         if i >= SEQ_LEN - 1 and TRAIN_START <= d <= TRAIN_END]
     test_end_di_list = [i for i, d in enumerate(dates)
-                        if i >= SEQ_LEN - 1 and d > TRAIN_CUTOFF]
+                        if i >= SEQ_LEN - 1 and TEST_START <= d <= TEST_END]
 
-    print(f"  日期数: {n_dates} | 训练窗口池: {len(train_end_di_list)} | 测试窗口池: {len(test_end_di_list)}")
+    print(f"  日期数: {n_dates} | 训练窗口池: {len(train_end_di_list)} "
+          f"({TRAIN_START}~{TRAIN_END}) | 测试窗口池: {len(test_end_di_list)} "
+          f"({TEST_START}~{TEST_END})")
 
     feat_store = FeatStore(feat_files, pid_to_extract_idx, max_cache=30, col_idx_map=col_idx_map)
 
@@ -333,7 +335,7 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 end_di = ft_di - l
                 if end_di < SEQ_LEN - 1:
                     break  # 窗口太小
-                if dates[end_di] <= TRAIN_CUTOFF:
+                if TRAIN_START <= dates[end_di] <= TRAIN_END:
                     w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                     train_pos_entries.append((w_idx, pi, 1.0))
 
@@ -343,7 +345,7 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 end_di = ft_di - l
                 if end_di < SEQ_LEN - 1:
                     break
-                if dates[end_di] > TRAIN_CUTOFF:
+                if TEST_START <= dates[end_di] <= TEST_END:
                     w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                     test_cands.append(w_idx)
             if test_cands:
@@ -565,6 +567,7 @@ def load_train_shard(shard_id):
     loader = _numpy_to_dataloader(np.asarray(data['s']), np.asarray(data['n']),
                                   np.asarray(data['m']), np.asarray(data['l']),
                                   shuffle=True, batch_size=BATCH_SIZE)
+    print(f"  [Train Shard {shard_id:02d}] {n_samples} 样本, {len(loader)} batches")
     return loader
 
 
@@ -577,24 +580,43 @@ def load_test_shard(shard_id):
     loader = _numpy_to_dataloader(np.asarray(data['s']), np.asarray(data['n']),
                                   np.asarray(data['m']), np.asarray(data['l']),
                                   shuffle=False, batch_size=BATCH_SIZE * 4)
+    print(f"  [Test Shard {shard_id:02d}] {n_samples} 样本, {len(loader)} batches")
     return loader
 
 
-def get_num_train_shards():
-    count = 0
-    for shard_id in range(TRAIN_SHARDS):
-        if os.path.exists(TRAIN_SHARD_PATTERN.format(shard_id)):
-            count += 1
+def get_train_shard_ids():
+    """返回实际参与训练的分片 ID 列表。TRAIN_SHARD_IDS 非空时按它过滤，否则取前 TRAIN_SHARDS 片。"""
+    if TRAIN_SHARD_IDS:
+        ids = [i for i in TRAIN_SHARD_IDS if os.path.exists(TRAIN_SHARD_PATTERN.format(i))]
+        if ids:
+            return ids
+    ids = []
+    for i in range(TRAIN_SHARDS):
+        if os.path.exists(TRAIN_SHARD_PATTERN.format(i)):
+            ids.append(i)
         else:
             break
-    return count
+    return ids
+
+
+def get_test_shard_ids():
+    """返回实际参与评估的测试分片 ID 列表。TEST_SHARD_IDS 非空时按它过滤，否则取前 TEST_SHARDS 片。"""
+    if TEST_SHARD_IDS:
+        ids = [i for i in TEST_SHARD_IDS if os.path.exists(TEST_SHARD_PATTERN.format(i))]
+        if ids:
+            return ids
+    ids = []
+    for i in range(TEST_SHARDS):
+        if os.path.exists(TEST_SHARD_PATTERN.format(i)):
+            ids.append(i)
+        else:
+            break
+    return ids
+
+
+def get_num_train_shards():
+    return len(get_train_shard_ids())
 
 
 def get_num_test_shards():
-    count = 0
-    for shard_id in range(TEST_SHARDS):
-        if os.path.exists(TEST_SHARD_PATTERN.format(shard_id)):
-            count += 1
-        else:
-            break
-    return count
+    return len(get_test_shard_ids())
