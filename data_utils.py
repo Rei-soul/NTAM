@@ -19,6 +19,7 @@ import os
 import gc
 import shutil
 import glob
+import json
 from collections import defaultdict, OrderedDict
 from config import *
 
@@ -28,6 +29,10 @@ TARGET_FILE = os.path.join(PROCESSED_DIR, "target_disks.csv")
 NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
+# ========== 分片切分 ==========
+# 分片数由 config 的 TRAIN_SHARDS / TEST_SHARDS 决定（均匀切分）。
+# 改 TRAIN_SHARDS / TEST_SHARDS 后需手动删除 datasets/processed 下对应 *_shard_*.npz 再重建。
+
 
 # r_ 原始值列，经 Z-score 按 model 标准化后使用（由 build_feat_r.py 生成）
 # 30 列 (30/3=10 整除 NUM_HEADS)
@@ -282,7 +287,7 @@ class FeatStore:
 
 def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                                 extract_pids, pid_to_extract_idx, feat_files,
-                                col_idx_map=None):
+                                col_idx_map=None, sets=('train', 'test')):
     """
     论文 per-disk 锚定方式生成样本（非滑动窗口扫描）。
 
@@ -290,8 +295,13 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
     故障盘（测试）: failure_time 前 l=1..TEST_LEAD_TIME 内随机选 1 天 → 1 条正样本
     健康盘:       从合法窗口中随机选 1 条负样本
 
+    sets: 需要生成并保存的集合（'train'/'test' 的子集）。
+          只重建部分集合时（如仅改 TEST_LEAD_TIME），其他集合的分片文件保持不变。
     col_idx_map: 若不为 None，FeatStore 读取旧文件后按此索引切片
     """
+    need_train = 'train' in sets
+    need_test = 'test' in sets
+
     n_dates = len(dates)
     # date_str → date_index，用于 failure_time 快速查找
     date_to_di = {d: i for i, d in enumerate(dates)}
@@ -331,36 +341,38 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 continue  # failure_time 不在数据日期范围内
 
             # === 训练集 TPS: l = 1..L ===
-            for l in range(1, L + 1):
-                end_di = ft_di - l
-                if end_di < SEQ_LEN - 1:
-                    break  # 窗口太小
-                if TRAIN_START <= dates[end_di] <= TRAIN_END:
-                    w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
-                    train_pos_entries.append((w_idx, pi, 1.0))
+            if need_train:
+                for l in range(1, L + 1):
+                    end_di = ft_di - l
+                    if end_di < SEQ_LEN - 1:
+                        break  # 窗口太小
+                    if TRAIN_START <= dates[end_di] <= TRAIN_END:
+                        w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                        train_pos_entries.append((w_idx, pi, 1.0))
 
             # === 测试集: l=1..TEST_LEAD_TIME 中随机选 1 条 ===
-            test_cands = []
-            for l in range(1, TEST_LEAD_TIME + 1):
-                end_di = ft_di - l
-                if end_di < SEQ_LEN - 1:
-                    break
-                if TEST_START <= dates[end_di] <= TEST_END:
-                    w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
-                    test_cands.append(w_idx)
-            if test_cands:
-                chosen = test_cands[RNG.randint(0, len(test_cands))]
-                test_pos_entries.append((chosen, pi, 1.0))
+            if need_test:
+                test_cands = []
+                for l in range(1, TEST_LEAD_TIME + 1):
+                    end_di = ft_di - l
+                    if end_di < SEQ_LEN - 1:
+                        break
+                    if TEST_START <= dates[end_di] <= TEST_END:
+                        w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
+                        test_cands.append(w_idx)
+                if test_cands:
+                    chosen = test_cands[RNG.randint(0, len(test_cands))]
+                    test_pos_entries.append((chosen, pi, 1.0))
         else:
             # === 健康盘：训练/测试各随机选 1 条负样本 ===
             n_healthy_disks += 1
 
-            if train_end_di_list:
+            if need_train and train_end_di_list:
                 end_di = train_end_di_list[RNG.randint(0, len(train_end_di_list))]
                 w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                 train_neg_entries.append((w_idx, pi, 0.0))
 
-            if test_end_di_list:
+            if need_test and test_end_di_list:
                 end_di = test_end_di_list[RNG.randint(0, len(test_end_di_list))]
                 w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                 test_neg_entries.append((w_idx, pi, 0.0))
@@ -370,42 +382,18 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
     n_test_pos = len(test_pos_entries)
     n_test_neg = len(test_neg_entries)
 
-    print(f"  故障盘: {n_fail_disks:,} | 健康盘: {n_healthy_disks:,}")
-    print(f"  训练集: 正 {n_train_pos:,} (TPS L={L}) | 负 {n_train_neg:,} "
-          f"| 正负比 1:{n_train_neg / max(n_train_pos, 1):.0f}")
-    print(f"  测试集: 正 {n_test_pos:,} (每盘 1 条) | 负 {n_test_neg:,} "
-          f"| 正负比 1:{n_test_neg / max(n_test_pos, 1):.0f}")
+    print(f'  故障盘: {n_fail_disks:,} | 健康盘: {n_healthy_disks:,}')
+    if need_train:
+        print(f'  训练集: 正 {n_train_pos:,} (TPS L={L}) | 负 {n_train_neg:,} | 正负比 1:{n_train_neg / max(n_train_pos, 1):.0f}')
+    if need_test:
+        print(f'  测试集: 正 {n_test_pos:,} (每盘 1 条) | 负 {n_test_neg:,} | 正负比 1:{n_test_neg / max(n_test_pos, 1):.0f}')
 
-    # ====== 合并 + 按窗口排序（利用 FeatStore 缓存局部性，大幅加速分片保存） ======
-    print(f"\n  训练集: 正样本全保留（TPS L={L}），负样本每盘 1 条")
-    train_selected = train_pos_entries + train_neg_entries
-    # 按窗口起始日索引排序，让同一窗口/相邻窗口的样本聚在一起
-    # 注意：不打乱！DataLoader 在加载时会 shuffle，不需要在分片层面打乱
-    train_selected.sort(key=lambda x: x[0][0])
-    n_train_final = len(train_selected)
-    print(f"  训练样本总计: {n_train_final:,} (正: {n_train_pos:,}, 负: {n_train_neg:,})")
-
-    test_all = test_pos_entries + test_neg_entries
-    test_all.sort(key=lambda x: x[0][0])
-    if MAX_TEST_SAMPLES > 0 and len(test_all) > MAX_TEST_SAMPLES:
-        test_selected = test_all[:MAX_TEST_SAMPLES]
-        n_test_final = len(test_selected)
-        n_test_pos_final = sum(1 for _, _, label in test_selected if label == 1.0)
-        print(f"\n  测试集: 随机采样至 {MAX_TEST_SAMPLES:,} (正: {n_test_pos_final})")
-    else:
-        test_selected = test_all
-        n_test_final = len(test_selected)
-        n_test_pos_final = n_test_pos
-        print(f"\n  测试集: 全量保留 {n_test_final:,} (正: {n_test_pos_final})")
-
-    # ====== 辅助函数：entry 现在用 w_idx (日期索引列表) 替代 wi (窗口索引) ======
+    # ====== 辅助函数 ======
     def _copy_sample(w_idx, pi, label, s_tgt, n_tgt, m_tgt, l_tgt, counter):
         pid = sampled_pids[pi]
-
         disk_seq = feat_store.get(pid, w_idx)
         if disk_seq is None:
             return counter
-
         neighbors = neighbor_map.get(pid, [])[:MAX_NEIGHBORS]
         neigh_seq_arr = np.zeros((MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM), dtype=np.float32)
         neigh_mask_arr = np.zeros(MAX_NEIGHBORS, dtype=np.bool_)
@@ -417,7 +405,6 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 continue
             neigh_seq_arr[j] = nseq
             neigh_mask_arr[j] = True
-
         s_tgt[counter] = disk_seq
         n_tgt[counter] = neigh_seq_arr
         m_tgt[counter] = neigh_mask_arr
@@ -425,83 +412,96 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
         return counter + 1
 
     def _save_shards(source_entries, shard_pattern, n_shards, label_prefix):
+        """按 n_shards 均匀切分（片数由 config 的 TRAIN_SHARDS/TEST_SHARDS 决定）。
+        改片数后需手动删除 datasets/processed 下对应 *_shard_*.npz 再重建。"""
         n_total = len(source_entries)
         if n_total == 0:
-            print(f"    {label_prefix}: 0 样本，跳过")
+            print(f'    {label_prefix}: 0 样本，跳过')
             return 0
 
         shard_size = (n_total + n_shards - 1) // n_shards
         n_actual = min(n_shards, (n_total + shard_size - 1) // shard_size)
 
-        shard_groups = [[] for _ in range(n_actual)]
-        for idx, item in enumerate(source_entries):
-            s = idx // shard_size
-            if s >= n_actual:
-                s = n_actual - 1
-            shard_groups[s].append(item)
+        print(f'    {label_prefix}: 共 {n_total:,} 样本，目标 {n_shards} 片 -> 实际 {n_actual} 片（每片约 {shard_size:,}）')
 
         for s in range(n_actual):
-            group = shard_groups[s]
+            group = source_entries[s * shard_size:(s + 1) * shard_size]
             n_shard = len(group)
             if n_shard == 0:
                 continue
-
             tmp_prefix = shard_pattern.format(s)
-            s_tmp = np.memmap(tmp_prefix + '.s.tmp', dtype=np.float32, mode='w+',
-                              shape=(n_shard, SEQ_LEN, FEAT_DIM))
-            n_tmp = np.memmap(tmp_prefix + '.n.tmp', dtype=np.float32, mode='w+',
-                              shape=(n_shard, MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM))
-            m_tmp = np.memmap(tmp_prefix + '.m.tmp', dtype=np.bool_, mode='w+',
-                              shape=(n_shard, MAX_NEIGHBORS))
-            l_tmp = np.memmap(tmp_prefix + '.l.tmp', dtype=np.float32, mode='w+',
-                              shape=(n_shard, 1))
-
+            s_tmp = np.memmap(tmp_prefix + '.s.tmp', dtype=np.float32, mode='w+', shape=(n_shard, SEQ_LEN, FEAT_DIM))
+            n_tmp = np.memmap(tmp_prefix + '.n.tmp', dtype=np.float32, mode='w+', shape=(n_shard, MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM))
+            m_tmp = np.memmap(tmp_prefix + '.m.tmp', dtype=np.bool_, mode='w+', shape=(n_shard, MAX_NEIGHBORS))
+            l_tmp = np.memmap(tmp_prefix + '.l.tmp', dtype=np.float32, mode='w+', shape=(n_shard, 1))
             for j, (w_idx, pi, label) in enumerate(group):
                 _copy_sample(w_idx, pi, label, s_tmp, n_tmp, m_tmp, l_tmp, j)
-
             np.savez_compressed(shard_pattern.format(s),
                                 s=np.array(s_tmp[:n_shard]),
                                 n=np.array(n_tmp[:n_shard]),
                                 m=np.array(m_tmp[:n_shard]),
                                 l=np.array(l_tmp[:n_shard]))
-
             n_pos_s = int(l_tmp[:n_shard].sum())
             sp = shard_pattern.format(s)
-            print(f"      {label_prefix}_shard_{s:02d}: {n_shard:,} "
-                  f"(正:{n_pos_s}, 负:{n_shard - n_pos_s}) "
-                  f"→ {os.path.getsize(sp) / 1024**2:.0f} MB")
-
+            print(f'      {label_prefix}_shard_{s:02d}: {n_shard:,} (正:{n_pos_s}, 负:{n_shard - n_pos_s}) -> {os.path.getsize(sp) / 1024**2:.0f} MB')
             del s_tmp, n_tmp, m_tmp, l_tmp
             for ext in ['.s.tmp', '.n.tmp', '.m.tmp', '.l.tmp']:
                 try:
                     os.remove(tmp_prefix + ext)
                 except:
                     pass
-
         return n_actual
 
-    print("\n  保存训练分片...")
-    n_train_shards = _save_shards(train_selected, TRAIN_SHARD_PATTERN, TRAIN_SHARDS, "train")
+    n_train_shards = n_test_shards = 0
 
-    print("  保存测试分片...")
-    n_test_shards = _save_shards(test_selected, TEST_SHARD_PATTERN, TEST_SHARDS, "test")
+    # ====== 合并 + 按窗口排序（利用 FeatStore 缓存局部性，大幅加速分片保存） ======
+    if need_train:
+        print(f'\n  训练集: 正样本全保留（TPS L={L}），负样本每盘 1 条')
+        train_selected = train_pos_entries + train_neg_entries
+        train_selected.sort(key=lambda x: x[0][0])
+        n_train_final = len(train_selected)
+        print(f'  训练样本总计: {n_train_final:,} (正: {n_train_pos:,}, 负: {n_train_neg:,})')
+        print('\n  保存训练分片...')
+        n_train_shards = _save_shards(train_selected, TRAIN_SHARD_PATTERN, TRAIN_SHARDS, 'train')
+
+    if need_test:
+        test_all = test_pos_entries + test_neg_entries
+        test_all.sort(key=lambda x: x[0][0])
+        if MAX_TEST_SAMPLES > 0 and len(test_all) > MAX_TEST_SAMPLES:
+            pos_entries = [e for e in test_all if e[2] == 1.0]
+            neg_entries = [e for e in test_all if e[2] == 0.0]
+            # 保持原始正负比例的分层随机采样；原实现取前 N 条会让测试集偏向最早时间段
+            n_pos_sel = int(round(MAX_TEST_SAMPLES * len(pos_entries) / max(len(test_all), 1)))
+            n_pos_sel = min(len(pos_entries), max(0, n_pos_sel))
+            n_neg_sel = MAX_TEST_SAMPLES - n_pos_sel
+            n_neg_sel = min(len(neg_entries), max(0, n_neg_sel))
+            pos_idx = RNG.choice(len(pos_entries), size=n_pos_sel, replace=False) if n_pos_sel else []
+            neg_idx = RNG.choice(len(neg_entries), size=n_neg_sel, replace=False) if n_neg_sel else []
+            test_selected = [pos_entries[i] for i in pos_idx] + [neg_entries[i] for i in neg_idx]
+            test_selected.sort(key=lambda x: x[0][0])
+            n_test_final = len(test_selected)
+            n_test_pos_final = sum(1 for _, _, label in test_selected if label == 1.0)
+            print(f'\n  测试集: 随机采样至 {MAX_TEST_SAMPLES:,} (正: {n_test_pos_final})')
+        else:
+            test_selected = test_all
+            n_test_final = len(test_selected)
+            n_test_pos_final = n_test_pos
+            print(f'\n  测试集: 全量保留 {n_test_final:,} (正: {n_test_pos_final})')
+        print('\n  保存测试分片...')
+        n_test_shards = _save_shards(test_selected, TEST_SHARD_PATTERN, TEST_SHARDS, 'test')
 
     feat_store.clear()
     gc.collect()
 
-    if n_train_shards == 0:
-        raise RuntimeError("没有生成任何训练样本！请检查数据或配置")
+    if need_train and n_train_shards == 0:
+        raise RuntimeError('没有生成任何训练样本！请检查数据或配置')
 
     return n_train_shards, n_test_shards
 
-
-# ============================================================
-# 6. 主入口
-# ============================================================
-
-def build_and_save_samples():
-    print("=" * 60)
-    print("[Phase 1] 构建样本数据集")
+def build_and_save_samples(sets=('train', 'test')):
+    sets_str = '+'.join(sets)
+    print('=' * 60)
+    print(f"[Phase 1] 构建样本数据集 ({sets_str})")
 
     disk_info = _load_disk_info()
     neighbor_map = _load_neighbor_map(disk_info)
@@ -521,22 +521,47 @@ def build_and_save_samples():
             all_needed.update(neighbor_map.get(pid, [])[:MAX_NEIGHBORS])
         extract_pids = sorted(all_needed)
         pid_to_extract_idx = {pid: i for i, pid in enumerate(extract_pids)}
+        # 防止 feat_day 与当前 FEAT_DIM / MAX_NEIGHBORS / MAX_DISKS 不匹配导致静默错位
+        _probe = np.load(feat_day_files[0], mmap_mode='r')
+        if _probe.shape[1] != FEAT_DIM:
+            raise RuntimeError(
+                f"feat_day 特征维度 ({_probe.shape[1]}) 与当前 FEAT_DIM ({FEAT_DIM}) 不一致。"
+                f"请删除 datasets/processed/feat_day_*.npy 和 r_stats.json 后重跑 build_feat_r.py")
+        if _probe.shape[0] != len(extract_pids):
+            raise RuntimeError(
+                f"feat_day 磁盘行数 ({_probe.shape[0]}) 小于当前需要的磁盘数 ({len(extract_pids)})。"
+                f"请删除 feat_day_*.npy 后重跑 build_feat_r.py")
         npy_date_count = len(feat_day_files)
         if npy_date_count != len(dates):
             print(f"  ⚠️ 警告: feat_day 文件数 ({npy_date_count}) 与日期数 ({len(dates)}) 不一致")
-            print(f"     将使用 feat_day 文件数限制样本生成的日期范围")
+            print("     将使用 feat_day 文件数限制样本生成的日期范围")
             dates = dates[:npy_date_count]
+        # feat_day 由 build_feat_r.py 标准化；训练范围变化时统计量也必须重建
+        _r_stats_path = os.path.join(PROCESSED_DIR, "r_stats.json")
+        if os.path.exists(_r_stats_path):
+            try:
+                with open(_r_stats_path, 'r', encoding='utf-8') as _f:
+                    _r_meta = json.load(_f)
+            except Exception:
+                _r_meta = {}
+            if (_r_meta.get('train_range') != [TRAIN_START, TRAIN_END]
+                    or _r_meta.get('cols') != N_COLS):
+                raise RuntimeError(
+                    "r_stats.json 与当前 TRAIN_START/TRAIN_END 或特征列不一致。"
+                    "请先运行 python code/build_feat_r.py 重建特征，再运行 train.py")
+        else:
+            print("  ⚠️ 未找到 r_stats.json：feat_day 可能是未标准化的原始值，"
+                  "建议先运行 python code/build_feat_r.py")
     else:
         dates, extract_pids, pid_to_extract_idx, feat_day_files = _extract_and_build_feat(
             disk_info, sampled_pids, neighbor_map)
 
     n_train, n_test = _generate_and_save_samples(
         dates, disk_info, sampled_pids, neighbor_map,
-        extract_pids, pid_to_extract_idx, feat_day_files)
+        extract_pids, pid_to_extract_idx, feat_day_files, sets=sets)
 
-    print("=" * 60)
+
     return n_train, n_test
-
 
 def _numpy_to_dataloader(s_arr, n_arr, m_arr, l_arr, shuffle, batch_size):
     ds = torch.utils.data.TensorDataset(
@@ -547,16 +572,31 @@ def _numpy_to_dataloader(s_arr, n_arr, m_arr, l_arr, shuffle, batch_size):
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
 
-def load_data():
-    if not os.path.exists(TRAIN_SHARD_PATTERN.format(0)) and not os.path.exists(TEST_SHARD_PATTERN.format(0)):
-        return build_and_save_samples()
-    else:
-        print("\n[data_utils] 找到已有分片文件，跳过构建...")
-        n_train = get_num_train_shards()
-        n_test = get_num_test_shards()
-        print(f"  训练分片: {n_train}, 测试分片: {n_test}")
-        return n_train, n_test
+def _set_shards_exist(set_name):
+    pattern = TRAIN_SHARD_PATTERN if set_name == 'train' else TEST_SHARD_PATTERN
+    return os.path.exists(pattern.format(0))
 
+
+def load_data():
+    # 不自动重建：分片由用户手动管理。改任何 config 参数都不会触发重建，
+    # 需要重建时手动删除 datasets/processed 下对应 *_shard_*.npz 文件即可。
+    # 这里只检查分片是否存在，缺失的集合才构建。
+    missing = []
+    for s in ('train', 'test'):
+        if not _set_shards_exist(s):
+            missing.append(s)
+
+    if missing:
+        sets_str = '+'.join(missing)
+        print(f"[data_utils] 检测到分片缺失: {sets_str}，开始构建...")
+        build_and_save_samples(tuple(missing))
+    else:
+        print("[data_utils] 找到训练/测试分片文件，跳过构建...")
+
+    n_train = get_num_train_shards()
+    n_test = get_num_test_shards()
+    print(f"  训练分片: {n_train}, 测试分片: {n_test}")
+    return n_train, n_test
 
 def load_train_shard(shard_id):
     shard_path = TRAIN_SHARD_PATTERN.format(shard_id)
@@ -585,34 +625,32 @@ def load_test_shard(shard_id):
 
 
 def get_train_shard_ids():
-    """返回实际参与训练的分片 ID 列表。TRAIN_SHARD_IDS 非空时按它过滤，否则取前 TRAIN_SHARDS 片。"""
+    """返回实际参与训练的分片 ID 列表。TRAIN_SHARD_IDS 非空时按它过滤，否则取前 TRAIN_SHARDS 片（0=全部）。"""
     if TRAIN_SHARD_IDS:
         ids = [i for i in TRAIN_SHARD_IDS if os.path.exists(TRAIN_SHARD_PATTERN.format(i))]
         if ids:
             return ids
     ids = []
-    for i in range(TRAIN_SHARDS):
-        if os.path.exists(TRAIN_SHARD_PATTERN.format(i)):
-            ids.append(i)
-        else:
-            break
+    limit = TRAIN_SHARDS if TRAIN_SHARDS > 0 else float('inf')
+    i = 0
+    while i < limit and os.path.exists(TRAIN_SHARD_PATTERN.format(i)):
+        ids.append(i)
+        i += 1
     return ids
 
-
 def get_test_shard_ids():
-    """返回实际参与评估的测试分片 ID 列表。TEST_SHARD_IDS 非空时按它过滤，否则取前 TEST_SHARDS 片。"""
+    """返回实际参与评估的测试分片 ID 列表。TEST_SHARD_IDS 非空时按它过滤，否则取前 TEST_SHARDS 片（0=全部）。"""
     if TEST_SHARD_IDS:
         ids = [i for i in TEST_SHARD_IDS if os.path.exists(TEST_SHARD_PATTERN.format(i))]
         if ids:
             return ids
     ids = []
-    for i in range(TEST_SHARDS):
-        if os.path.exists(TEST_SHARD_PATTERN.format(i)):
-            ids.append(i)
-        else:
-            break
+    limit = TEST_SHARDS if TEST_SHARDS > 0 else float('inf')
+    i = 0
+    while i < limit and os.path.exists(TEST_SHARD_PATTERN.format(i)):
+        ids.append(i)
+        i += 1
     return ids
-
 
 def get_num_train_shards():
     return len(get_train_shard_ids())

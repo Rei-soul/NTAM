@@ -52,6 +52,19 @@ def main():
     # 从 Pass 1 的中断恢复
     r_stats_path = os.path.join(PROCESSED_DIR, "r_stats.json")
     if os.path.exists(r_stats_path):
+        try:
+            with open(r_stats_path, 'r') as f:
+                saved_meta = json.load(f)
+        except Exception:
+            saved_meta = {}
+        if (saved_meta.get('train_range') != [TRAIN_START, TRAIN_END]
+                or saved_meta.get('cols') != R_COLS):
+            print(f"  检测到 r_stats.json 与当前训练范围/列配置不一致，将重新统计 Pass 1")
+            try:
+                os.remove(r_stats_path)
+            except OSError:
+                pass
+    if os.path.exists(r_stats_path):
         print(f"  检测到已有 r_stats.json，跳过 Pass 1")
         with open(r_stats_path, 'r') as f:
             saved = json.load(f)
@@ -114,7 +127,9 @@ def main():
         with open(r_stats_path, 'w') as f:
             json.dump({
                 'per_model': {f"{m}_r_{R_COLS[ci][2:]}": s for (m, ci), s in stats_final.items()},
-                'global': {R_COLS[ci]: gs for ci, gs in global_stats.items()}
+                'global': {R_COLS[ci]: gs for ci, gs in global_stats.items()},
+                  'train_range': [TRAIN_START, TRAIN_END],
+                  'cols': R_COLS
             }, f, indent=2)
 
         print(f"\n    训练集天数: {train_count} | model数: {len(set(k[0] for k in stats_final))}")

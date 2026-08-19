@@ -83,8 +83,20 @@ def evaluate_all(model, n_test_shards, criterion, scaler=None, verbose=False, te
     return total_loss / max(total_samples, 1), acc, prec, rec, f1, f0_5
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler):
-    """训练一个 epoch，返回 (avg_loss, accuracy)"""
+def get_shard_weight(shard_id):
+    """返回指定训练分片的损失权重（TRAIN_SHARD_WEIGHTS 支持 dict 或 list 两种格式）"""
+    w = TRAIN_SHARD_WEIGHTS
+    if not w:
+        return 1.0
+    if isinstance(w, dict):
+        return float(w.get(shard_id, 1.0))
+    if isinstance(w, (list, tuple)):
+        return float(w[shard_id]) if shard_id < len(w) else 1.0
+    return 1.0
+
+
+def train_one_epoch(model, loader, criterion, optimizer, scaler, loss_weight=1.0):
+    """训练一个 epoch，返回 (avg_loss, accuracy)；loss_weight 用于分片级损失加权"""
     model.train()
     total_loss = 0.0
     total_correct = 0
@@ -96,7 +108,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler):
         optimizer.zero_grad()
 
         prob, logits = model(sf, nf, nm)
-        loss = criterion(logits, lb)
+        loss = criterion(logits, lb) * loss_weight  # 分片级损失权重
 
         if torch.isnan(loss):
             nan_batches += 1
@@ -198,6 +210,11 @@ def train():
     print("\n[1] 加载数据...")
     n_train_shards, n_test_shards = load_data()
     print(f"  训练分片: {n_train_shards}, 测试分片: {n_test_shards}")
+    if TRAIN_SHARD_WEIGHTS:
+        wmap = {sid: get_shard_weight(sid) for sid in get_train_shard_ids()}
+        print(f"  分片权重(损失放大): {wmap}")
+    else:
+        print("  分片权重: 全部等权 1.0（TRAIN_SHARD_WEIGHTS 未启用）")
 
     # 2. 实例化模型
     model = NTAM(
@@ -237,7 +254,8 @@ def train():
         # 训练
         for shard_id in get_train_shard_ids():
             train_loader = load_train_shard(shard_id)
-            avg_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
+            w = get_shard_weight(shard_id)
+            avg_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler, loss_weight=w)
             epoch_loss += avg_loss * len(train_loader.dataset)
             epoch_correct += train_acc * len(train_loader.dataset)
             epoch_samples += len(train_loader.dataset)

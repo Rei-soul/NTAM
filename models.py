@@ -119,7 +119,7 @@ class NTAM(nn.Module):
     """
     输入:
         self_feat_seq:   [batch_size, seq_len, feature_dim]   当前磁盘的时序数据
-        neigh_feat_seq:  [batch_size, seq_len, max_neighbors, feature_dim]  所有邻居的时序数据
+        neigh_feat_seq:  [batch_size, max_neighbors, seq_len, feature_dim]  所有邻居的时序数据（data_utils 实际存储顺序，forward 内部会转置）
         neighbor_mask:   [batch_size, max_neighbors]           有效邻居掩码 (所有时间步共享)
     输出:
         prob:            [batch_size, 1]                      故障概率
@@ -156,7 +156,18 @@ class NTAM(nn.Module):
             # ====== 完整路径：邻域注意力 → 时序编码 → 决策 ======
             # 1) 展平批次和时间维度
             self_feat_flat = self_feat_seq.view(B * T, F)          # [B*T, F]
-            neigh_feat_flat = neigh_feat_seq.view(B * T, M, F)     # [B*T, M, F]
+            # 注意: data_utils 里 n 的真实形状是 [B, M, T, F]，
+            # 必须 permute 成 [B, T, M, F] 后再展平，否则 view 会把
+            # (邻居, 时间) 两个维度错误地混在一起。
+            # 兼容两种输入布局，避免以后改数据管道时再次出现静默错位。
+            if neigh_feat_seq.shape[1] == M and neigh_feat_seq.shape[2] == T:
+                neigh_feat_flat = neigh_feat_seq.permute(0, 2, 1, 3).reshape(B * T, M, F)
+            elif neigh_feat_seq.shape[1] == T and neigh_feat_seq.shape[2] == M:
+                neigh_feat_flat = neigh_feat_seq.reshape(B * T, M, F)
+            else:
+                raise ValueError(
+                    f"neigh_feat_seq 形状异常: {tuple(neigh_feat_seq.shape)}，"
+                    f"期望 [B, M, T, F] 或 [B, T, M, F]，M={M}, T={T}")
 
             # 2) 扩展掩码以匹配 B*T（expand 零拷贝，不额外分配内存）
             mask_flat = neighbor_mask.unsqueeze(1).expand(-1, T, -1).reshape(B * T, M)  # [B*T, M]
