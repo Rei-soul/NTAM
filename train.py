@@ -80,7 +80,7 @@ def evaluate_all(model, n_test_shards, criterion, scaler=None, verbose=False):
     return total_loss / max(total_samples, 1), acc, prec, rec, f1
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, loss_weight=1.0):
     """训练一个 epoch，返回 (avg_loss, accuracy)"""
     model.train()
     total_loss = 0.0
@@ -94,6 +94,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler):
 
         prob, logits = model(sf, nf, nm)
         loss = criterion(logits, lb)
+        if loss_weight != 1.0:
+            loss = loss * loss_weight
 
         if torch.isnan(loss):
             nan_batches += 1
@@ -150,7 +152,7 @@ def save_trained_model(model, best_record, final_metrics, epoch_records, save_di
     os.makedirs(save_dir, exist_ok=True)
 
     # 1) 最佳模型完整存档：权重统一转到 CPU，方便日后在无 GPU 机器上加载
-    best_path = os.path.join(save_dir, "ntam_best.pt")
+    best_path = os.path.join(save_dir, SAVE_NAME)
     torch.save({
         'model_state_dict': {k: v.detach().cpu() for k, v in model.state_dict().items()},
         'config': _extract_model_config(model),
@@ -220,6 +222,12 @@ def train():
     print(f"\n[2] 训练 ({EPOCHS} epochs × {n_train_shards} 分片) | "
           f"每 epoch 后评估 {n_test_shards} 个测试分片")
 
+    shard_weights = [1.0 + TIME_WEIGHT_ALPHA * i / max(n_train_shards - 1, 1)
+                     for i in range(n_train_shards)]
+    if TIME_WEIGHT_ALPHA > 0:
+        print('    time-weight: alpha={} shard weight {:.2f}~{:.2f}'.format(
+              TIME_WEIGHT_ALPHA, shard_weights[0], shard_weights[-1]))
+
     epoch_records = []  # 每个 epoch 的 (epoch, train_loss, test_prec, test_rec, test_f1, state_dict)
 
     for epoch in range(1, EPOCHS + 1):
@@ -232,7 +240,8 @@ def train():
         # 训练
         for shard_id in range(n_train_shards):
             train_loader = load_train_shard(shard_id)
-            avg_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
+            avg_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler,
+                                                  loss_weight=shard_weights[shard_id])
             epoch_loss += avg_loss * len(train_loader.dataset)
             epoch_correct += train_acc * len(train_loader.dataset)
             epoch_samples += len(train_loader.dataset)
@@ -283,6 +292,26 @@ def train():
 
     # 7. 用最佳模型做最终详细评估
     print(f"\n  [评估] 用最佳模型 (epoch {best_record['epoch']}) 评估测试集...")
+    # 6.5 fine-tune on most recent shards (near test cutoff)
+    if FINE_TUNE_LAST_SHARDS > 0:
+        ft_shard_ids = list(range(max(0, n_train_shards - FINE_TUNE_LAST_SHARDS), n_train_shards))
+        print("\n  [fine-tune] last %d shards %s (%d epochs, lr=%g)..." % (len(ft_shard_ids), ft_shard_ids, FINE_TUNE_EPOCHS, FINE_TUNE_LR))
+        pre_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        ft_optimizer = optim.Adam(model.parameters(), lr=FINE_TUNE_LR)
+        for ft_ep in range(FINE_TUNE_EPOCHS):
+            ft_loss = 0.0
+            for ft_sid in ft_shard_ids:
+                ft_loader = load_train_shard(ft_sid)
+                ft_loss, _ = train_one_epoch(model, ft_loader, criterion, ft_optimizer, None, loss_weight=1.0)
+                del ft_loader
+            print("    fine-tune epoch %d/%d | loss=%.4f" % (ft_ep + 1, FINE_TUNE_EPOCHS, ft_loss))
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
+        ft_loss, _, ft_p, ft_r, ft_f1 = evaluate_all(model, n_test_shards, criterion, scaler, verbose=False)
+        print("  -> after fine-tune: F1=%.4f (P %.4f R %.4f)" % (ft_f1, ft_p, ft_r))
+        if best_record is not None and ft_f1 < best_record['test_f1']:
+            print("    fine-tune did not improve (F1 %.4f < %.4f), reverting" % (ft_f1, best_record['test_f1']))
+            model.load_state_dict(pre_sd)
     final_test_loss, final_test_acc, final_prec, final_rec, final_f1 = evaluate_all(model, n_test_shards, criterion, scaler, verbose=True)
     print(f"\n{'=' * 60}")
     print("最终评估结果:")

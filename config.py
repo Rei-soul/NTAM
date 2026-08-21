@@ -39,7 +39,7 @@ USE_VALIDATION = False  # 已废弃：改为每epoch直接评估测试集，此�
 VAL_SPLIT = 0.1          # 验证集比例（10%训练样本做早停）
 PATIENCE = 3             # 早停耐心值：验证Loss连续5个epoch不降则停止
 TRAIN_SHARDS = 10        # 恢复 10 分片（样本量增大）
-TEST_SHARDS = 2         # 测试样本增多，增加分片数降低单片内存
+TEST_SHARDS = 10         # 测试样本增多，增加分片数降低单片内存
 MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，保持原始分布比例）
 USE_AMP = False          # 关闭混合精度
 MEMORY_LIMIT_GB = 8      # 内存看门狗阈值（GB），超过此值自动终止进程防止死机
@@ -47,3 +47,15 @@ DEVICE = "cuda"
 
 # ========== 模型保存 ==========
 SAVE_DIR = "saved_models"  # 训练完成后保存最佳模型与训练日志的目录（相对当前工作目录）
+
+
+# ========== 时间加权训练（越接近测试截止日期的训练分片 loss 权重越高）==========
+TIME_WEIGHT_ALPHA = 1.5   # 时间加权强度: 0=关闭; >0 时最近的分片获得更高 loss 权重
+
+# ========== 近期微调（主训练后，用最贴近测试期的分片小步长增量更新）==========
+FINE_TUNE_LAST_SHARDS = 2   # 取最后 N 个训练分片（按时间排序，越靠后越接近测试期）
+FINE_TUNE_EPOCHS = 2
+FINE_TUNE_LR = 1e-6
+
+# ========== 模型保存 ==========
+SAVE_NAME = "ntam_best_tw.pt"   # 时间加权+微调模型文件名（保留原 ntam_best.pt 做基线对比）
