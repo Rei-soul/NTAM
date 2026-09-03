@@ -20,9 +20,9 @@ import torch
 
 from config import *
 from models import NTAM
-from data_utils import (load_train_shard, load_test_shard,
-                        get_num_train_shards, get_num_test_shards,
-                        TRAIN_SHARD_PATTERN, TEST_SHARD_PATTERN)
+from data_utils import (load_train_shard, load_val_shard, load_test_shard,
+                        get_num_train_shards, get_num_val_shards, get_num_test_shards,
+                        TRAIN_SHARD_PATTERN, VAL_SHARD_PATTERN, TEST_SHARD_PATTERN)
 
 
 def parse_shards(shards_arg, n_available):
@@ -65,13 +65,14 @@ def load_model(model_path, device):
 
     cfg = meta.get('config') or {}
     kw = dict(
-        feat_dim=cfg.get('feat_dim', FEAT_DIM),
+        feat_dim=cfg.get('input_dim', cfg.get('feat_dim', INPUT_FEAT_DIM)),
         seq_len=cfg.get('seq_len', SEQ_LEN),
         max_neighbors=cfg.get('max_neighbors', MAX_NEIGHBORS),
-        num_layers=cfg.get('transformer_layers', TRANSFORMER_LAYERS),
+        num_layers=cfg.get('layers', cfg.get('transformer_layers', TRANSFORMER_LAYERS)),
         nhead=cfg.get('num_heads', NUM_HEADS),
         dropout=cfg.get('dropout', DROPOUT),
         use_neighborhood=cfg.get('use_neighborhood', USE_NEIGHBORHOOD),
+        model_dim=cfg.get('model_dim', MODEL_DIM),
     )
     model = NTAM(**kw)
     model.load_state_dict(state_dict)
@@ -128,7 +129,7 @@ def run_inference(model, shard_ids, device, set_name='test'):
     labels_all, probs_all = [], []
     per_shard = []
     for sid in shard_ids:
-        loader = load_test_shard(sid) if set_name == 'test' else load_train_shard(sid)
+        loader = load_test_shard(sid) if set_name == 'test' else (load_val_shard(sid) if set_name == 'val' else load_train_shard(sid))
         labels_s, probs_s = [], []
         with torch.no_grad():
             for sf, nf, nm, lb in loader:
@@ -156,7 +157,7 @@ def main():
                     help="checkpoint 路径（默认: saved_models/ntam_best.pt）")
     ap.add_argument("--shards", default="all",
                     help="评估的分片 ID，逗号分隔/范围，如 '0,1,2' 或 '0-2'；默认 all")
-    ap.add_argument("--set", default="test", choices=["test", "train"],
+    ap.add_argument("--set", default="test", choices=["test", "val", "train"],
                     help="评估测试集还是训练集分片（默认 test）")
     ap.add_argument("--threshold", type=float, default=0.5, help="判定阈值（默认 0.5）")
     ap.add_argument("--thresholds", default=None,
@@ -180,15 +181,14 @@ def main():
         print(f"  存档信息: best_epoch={meta.get('best_epoch')}, final_metrics={meta.get('final_metrics')}")
 
     # 确定要评估的分片
-    if args.set == 'test':
-        n_available = get_num_test_shards()
-    else:
-        n_available = get_num_train_shards()
+    if args.set == 'test': n_available = get_num_test_shards()
+    elif args.set == 'val': n_available = get_num_val_shards()
+    else: n_available = get_num_train_shards()
     if n_available == 0:
         print(f"⚠️ 未找到任何 {args.set} 分片文件，请先运行 train.py 生成分片。")
         sys.exit(1)
     shard_ids = parse_shards(args.shards, n_available)
-    pattern = TEST_SHARD_PATTERN if args.set == 'test' else TRAIN_SHARD_PATTERN
+    pattern = TEST_SHARD_PATTERN if args.set == 'test' else (VAL_SHARD_PATTERN if args.set == 'val' else TRAIN_SHARD_PATTERN)
     missing = [sid for sid in shard_ids if not os.path.exists(pattern.format(sid))]
     if missing:
         print(f"⚠️ 以下分片不存在: {missing}")

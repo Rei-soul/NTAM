@@ -10,9 +10,9 @@ from tqdm import tqdm
 from config import DATA_MONTH_START, DATA_MONTH_END
 
 # ========== 参数 ==========
-DATA_DIR = "D:/2018Datasets"
-OUTPUT_DIR = "datasets/processed"
-LOCATION_FILE = "D:/2018Datasets/location_info_of_ssd.csv"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+OUTPUT_DIR = "/mnt/newdisk/qhmiao/datasets/processed"
+LOCATION_FILE = "/mnt/newdisk/qhmiao/NTAM/datasets/location_info_of_ssd.csv"
 YEAR = 2018
 MONTH_START = DATA_MONTH_START
 MONTH_END = DATA_MONTH_END
@@ -78,7 +78,7 @@ def main():
 
     # ====== 第③步：加载故障标签（按 disk_id 打标） ======
     print("\n[3/5] 加载故障标签...")
-    tag_path = os.path.join(DATA_DIR, "ssd_failure_tag2.csv")
+    tag_path = "/mnt/newdisk/qhmiao/NTAM/datasets/ssd_failure_tag2.csv"
     tag_df = pd.read_csv(tag_path)
     tag_df['failure_time'] = pd.to_datetime(tag_df['failure_time'])
 

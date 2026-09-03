@@ -15,8 +15,8 @@ from collections import defaultdict
 from config import *
 from memory_guard import start_guard
 
-DATA_DIR = "D:/2018Datasets"
-PROCESSED_DIR = "datasets/processed"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+PROCESSED_DIR = "/mnt/newdisk/qhmiao/datasets/processed"
 
 R_COLS = [f"r_{sid}" for sid in [
     5, 9, 12, 170, 171, 172, 173, 174, 175,
