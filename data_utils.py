@@ -22,8 +22,8 @@ import glob
 from collections import defaultdict, OrderedDict
 from config import *
 
-DATA_DIR = "D:/2018Datasets"
-PROCESSED_DIR = "datasets/processed"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+PROCESSED_DIR = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data"
 TARGET_FILE = os.path.join(PROCESSED_DIR, "target_disks.csv")
 NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")

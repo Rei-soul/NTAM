@@ -42,7 +42,7 @@ TRAIN_SHARDS = 10        # 恢复 10 分片（样本量增大）
 TEST_SHARDS = 2         # 测试样本增多，增加分片数降低单片内存
 MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，保持原始分布比例）
 USE_AMP = False          # 关闭混合精度
-MEMORY_LIMIT_GB = 8      # 内存看门狗阈值（GB），超过此值自动终止进程防止死机
+MEMORY_LIMIT_GB = 128      # 内存看门狗阈值（GB），超过此值自动终止进程防止死机
 DEVICE = "cuda"
 
 # ========== 模型保存 ==========

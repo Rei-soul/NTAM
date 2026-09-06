@@ -30,8 +30,8 @@ import pandas as pd
 from collections import defaultdict
 
 # ========== 参数 ==========
-TARGET_PATH = os.path.join("datasets", "processed", "target_disks.csv")
-NEIGHBOR_PATH = os.path.join("datasets", "processed", "neighbor_map.csv")
+TARGET_PATH = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data/target_disks.csv"
+NEIGHBOR_PATH = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data/neighbor_map.csv"
 
 
 def main():

@@ -10,9 +10,9 @@ from tqdm import tqdm
 from config import DATA_MONTH_START, DATA_MONTH_END
 
 # ========== 参数 ==========
-DATA_DIR = "D:/2018Datasets"
-OUTPUT_DIR = "datasets/processed"
-LOCATION_FILE = "D:/2018Datasets/location_info_of_ssd.csv"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+OUTPUT_DIR = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data"
+LOCATION_FILE = "/mnt/newdisk/qhmiao/datasets/location_info_of_ssd.csv"
 YEAR = 2018
 MONTH_START = DATA_MONTH_START
 MONTH_END = DATA_MONTH_END
