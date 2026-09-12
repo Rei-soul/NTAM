@@ -214,7 +214,7 @@ def train():
     scaler = torch.cuda.amp.GradScaler() if (USE_AMP and DEVICE == "cuda") else None
 
     if pos_weight is not None:
-        print(f"  使用 pos_weight={POS_WEIGHT} (补偿训练集正负比约1:11)")
+        print(f"  使用 pos_weight={POS_WEIGHT} ")
 
     # 4. 训练：每 epoch 后评估测试集，记录指标
     print(f"\n[2] 训练 ({EPOCHS} epochs × {n_train_shards} 分片) | "

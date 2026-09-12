@@ -23,7 +23,7 @@ SEQ_LEN = 8              # 时间步长 h（8天窗口，信号分析显示故�
 MAX_NEIGHBORS = 5        # 最大邻居数量 M
 
 # ========== 模型结构 ==========
-TRANSFORMER_LAYERS = 3  # Transformer编码器层数（最佳配置：10层）
+TRANSFORMER_LAYERS = 3  # Transformer编码器层数最佳配置：10层）
 NUM_HEADS =  3           # 多头注意力头数（30/3=10，整除）
 DROPOUT = 0.1            # Dropout比率
 
@@ -33,13 +33,13 @@ USE_NEIGHBORHOOD = True   # True=完整NTAM, False=消融实验(无邻域组件,
 # ========== 训练 ==========
 BATCH_SIZE = 64          # 批次大小
 LEARNING_RATE = 9e-5
-EPOCHS = 5              # EPOCHS上限，早停会自动提前终止
+EPOCHS = 30              # EPOCHS上限，早停会自动提前终止
 POS_WEIGHT = 0           # 不使用正样本权重（0=关闭）
 USE_VALIDATION = False  # 已废弃：改为每epoch直接评估测试集，此参数不再被 train.py 使用
 VAL_SPLIT = 0.1          # 验证集比例（10%训练样本做早停）
-PATIENCE = 3             # 早停耐心值：验证Loss连续5个epoch不降则停止
+PATIENCE = 3             # 早停耐心值：
 TRAIN_SHARDS = 10        # 恢复 10 分片（样本量增大）
-TEST_SHARDS = 2         # 测试样本增多，增加分片数降低单片内存
+TEST_SHARDS = 10         # 测试样本增多，增加分片数降低单片内存
 MAX_TEST_SAMPLES = -1    # 测试集最大样本数（超出时随机采样，保持原始分布比例）
 USE_AMP = False          # 关闭混合精度
 MEMORY_LIMIT_GB = 128      # 内存看门狗阈值（GB），超过此值自动终止进程防止死机

@@ -29,9 +29,9 @@ NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
 
-# r_ 原始值列，经 Z-score 按 model 标准化后使用（由 build_feat_r.py 生成）
+# n_ vendor-normalized 原始值列（厂商归一化后的数据，不经过Z-score）
 # 30 列 (30/3=10 整除 NUM_HEADS)
-N_COLS = [f"r_{sid}" for sid in [
+N_COLS = [f"n_{sid}" for sid in [
     5, 9, 12,
     170, 171, 172, 173, 174, 175,
     177,
@@ -405,7 +405,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
             return counter
 
         neighbors = neighbor_map.get(pid, [])[:MAX_NEIGHBORS]
-        neigh_seq_arr = np.zeros((MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM), dtype=np.float32)
+        # 🔧 修复：改为 [T, M, F] 布局（时间优先），避免模型中的 permute 操作
+        neigh_seq_arr = np.zeros((SEQ_LEN, MAX_NEIGHBORS, FEAT_DIM), dtype=np.float32)
         neigh_mask_arr = np.zeros(MAX_NEIGHBORS, dtype=np.bool_)
         for j, npid in enumerate(neighbors):
             nseq = feat_store.get(npid, w_idx)
@@ -413,7 +414,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 continue
             if np.isnan(nseq).all() or np.all(nseq == 0):
                 continue
-            neigh_seq_arr[j] = nseq
+            # 填充到所有时间步的第 j 个邻居位置
+            neigh_seq_arr[:, j, :] = nseq
             neigh_mask_arr[j] = True
 
         s_tgt[counter] = disk_seq
@@ -447,8 +449,9 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
             tmp_prefix = shard_pattern.format(s)
             s_tmp = np.memmap(tmp_prefix + '.s.tmp', dtype=np.float32, mode='w+',
                               shape=(n_shard, SEQ_LEN, FEAT_DIM))
+            # 🔧 修复：改为 [T, M, F] 布局
             n_tmp = np.memmap(tmp_prefix + '.n.tmp', dtype=np.float32, mode='w+',
-                              shape=(n_shard, MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM))
+                              shape=(n_shard, SEQ_LEN, MAX_NEIGHBORS, FEAT_DIM))
             m_tmp = np.memmap(tmp_prefix + '.m.tmp', dtype=np.bool_, mode='w+',
                               shape=(n_shard, MAX_NEIGHBORS))
             l_tmp = np.memmap(tmp_prefix + '.l.tmp', dtype=np.float32, mode='w+',
@@ -509,7 +512,7 @@ def build_and_save_samples():
     feat_day_files = sorted(glob.glob(os.path.join(PROCESSED_DIR, "feat_day_*.npy")))
 
     if feat_day_files:
-        # 已有 feat_day 文件（由 build_feat_r.py 生成），跳过特征提取
+        # 已有 feat_day 文件，跳过特征提取（若是旧 r_/Z-score 产物请先删除 feat_day_*.npy 再重建，避免误用）
         print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy 文件，跳过特征提取")
 
         dates, _ = _scan_csv_dates()

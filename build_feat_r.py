@@ -1,4 +1,6 @@
-# build_feat_r.py
+# build_feat_r.py  -- 已废弃(ARCHIVED)
+# ⚠️ 当前 data_utils 已改用 n_ 特征(N_COLS)，由 _extract_and_build_feat() 自动生成 feat_day_*.npy，无需运行本脚本。
+# ⚠️ 若误运行会用 r_ Z-score 结果覆盖 feat_day_*.npy，与 n_ 训练数据不匹配且无报错！
 # r_ 原始值 Z-score 标准化脚本
 # 
 # Pass 1: 按 model 统计 r_ 列的 mean/std (Welford 算法, 只用训练集)
