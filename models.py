@@ -73,8 +73,9 @@ class TemporalEncoder(nn.Module):
         self.feat_dim = feat_dim
         self.seq_len = seq_len
 
-        # 2.1 位置编码 (Positional Embedding) - 使用可学习的版本
-        self.pos_embedding = nn.Parameter(torch.randn(1, seq_len, feat_dim))
+        # 2.1 位置编码 - 使用固定正弦编码（Transformer原论文方法）
+        # 不需要学习，数学保证不同位置的编码不同
+        self.register_buffer('pos_embedding', self._sinusoidal_encoding(seq_len, feat_dim))
 
         # 2.2 Transformer 编码器 (只使用 Encoder 部分)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -93,10 +94,25 @@ class TemporalEncoder(nn.Module):
         # 论文式 (3): v_t = softmax(FC(r''(t))), 为每个时间步计算权重
         self.time_attn_fc = nn.Linear(feat_dim, 1)   # 输出一个标量分数
 
+    def _sinusoidal_encoding(self, seq_len, d_model):
+        """
+        生成固定的正弦位置编码（Transformer原论文）
+        PE(pos, 2i) = sin(pos / 10000^(2i/d_model))
+        PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+        """
+        import math
+        position = torch.arange(seq_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe = torch.zeros(1, seq_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        return pe
+
     def forward(self, r_sequence):
         # r_sequence: [B, T, F]
 
-        # 加入位置编码
+        # 加入位置编码（固定正弦编码，不需要学习）
         r_sequence = r_sequence + self.pos_embedding   # [B, T, F]
 
         # 通过 Transformer 编码器 (让每个时间步融合上下文信息)
@@ -119,11 +135,11 @@ class NTAM(nn.Module):
     """
     输入:
         self_feat_seq:   [batch_size, seq_len, feature_dim]   当前磁盘的时序数据
-        neigh_feat_seq:  [batch_size, max_neighbors, seq_len, feature_dim]  所有邻居的时序数据
+        neigh_feat_seq:  [batch_size, seq_len, max_neighbors, feature_dim]  所有邻居的时序数据
         neighbor_mask:   [batch_size, max_neighbors]           有效邻居掩码 (所有时间步共享)
     输出:
         prob:            [batch_size, 1]                      故障概率
-    
+
     use_neighborhood: True=完整NTAM, False=消融实验(跳过邻域组件, 对应论文NTAM_alt1)
     """
     def __init__(self, feat_dim, seq_len, max_neighbors, num_layers, nhead, dropout,
@@ -156,13 +172,8 @@ class NTAM(nn.Module):
             # ====== 完整路径：邻域注意力 → 时序编码 → 决策 ======
             # 1) 展平批次和时间维度
             self_feat_flat = self_feat_seq.view(B * T, F)          # [B*T, F]
-            # data_utils 的真实布局是 [B, M, T, F]（neigh_seq_arr 为 (MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM)）。
-            # 必须先 permute 成 [B, T, M, F] 再展平，否则 view 会把 (邻居, 时间) 两维混在一起。
-            if neigh_feat_seq.shape[1] != M or neigh_feat_seq.shape[2] != T:
-                raise ValueError(
-                    f"neigh_feat_seq 形状异常: {tuple(neigh_feat_seq.shape)}，"
-                    f"期望 [B, M={M}, T={T}, F]")
-            neigh_feat_flat = neigh_feat_seq.permute(0, 2, 1, 3).reshape(B * T, M, F)  # [B*T, M, F]
+            # 🔧 修复：数据布局已改为 [B, T, M, F]，直接 reshape 即可，无需 permute
+            neigh_feat_flat = neigh_feat_seq.reshape(B * T, M, F)  # [B*T, M, F]
 
             # 2) 扩展掩码以匹配 B*T（expand 零拷贝，不额外分配内存）
             mask_flat = neighbor_mask.unsqueeze(1).expand(-1, T, -1).reshape(B * T, M)  # [B*T, M]

@@ -3,7 +3,7 @@
 #
 # 流程：
 #   1. 加载 target_disks.csv（磁盘清单）和 neighbor_map.csv（邻居关系长表）
-#   2. 扫描日期，按 TRAIN_CUTOFF 划分训练/测试窗口
+#   2. 扫描日期，按 config 的 DATA_START/TRAIN_END/TEST_END 划分训练/测试窗口（判定集中在 _split_of）
 #   3. 滑动窗口 + TPS 为每条 (disk, window) 打标签
 #      - 故障盘 + 窗口结束日到故障日 ∈ [1, L]      → 正样本 (训练时 TPS 扩增)
 #      - 故障盘 + 窗口结束日到故障日 ∈ [1, TEST_LEAD_TIME] → 正样本 (测试时，每盘随机 1 条)
@@ -22,16 +22,15 @@ import glob
 from collections import defaultdict, OrderedDict
 from config import *
 
-DATA_DIR = "D:/2018Datasets"
-PROCESSED_DIR = "datasets/processed"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+PROCESSED_DIR = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data"
 TARGET_FILE = os.path.join(PROCESSED_DIR, "target_disks.csv")
 NEIGHBOR_MAP_FILE = os.path.join(PROCESSED_DIR, "neighbor_map.csv")
 TRAIN_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "train_shard_{:02d}.npz")
 TEST_SHARD_PATTERN = os.path.join(PROCESSED_DIR, "test_shard_{:02d}.npz")
-
-# r_ 原始值列，经 Z-score 按 model 标准化后使用（由 build_feat_r.py 生成）
+# n_ vendor-normalized 原始值列（厂商归一化后的数据，不经过Z-score）
 # 30 列 (30/3=10 整除 NUM_HEADS)
-N_COLS = [f"r_{sid}" for sid in [
+N_COLS = [f"n_{sid}" for sid in [
     5, 9, 12,
     170, 171, 172, 173, 174, 175,
     177,
@@ -49,12 +48,26 @@ RNG = np.random.RandomState(42)
 # 1. 日期扫描 & 窗口生成
 # ============================================================
 
+def _split_of(date_str):
+    """唯一的划分判定点：返回 'train' / 'test' / 'out'。
+
+    窗口结束日 <= TRAIN_END -> 'train'；> TRAIN_END 且 <= TEST_END -> 'test'；
+    其余（早于 DATA_START 或晚于 TEST_END）-> 'out'。
+    """
+    if date_str < DATA_START or date_str > TEST_END:
+        return 'out'
+    return 'train' if date_str <= TRAIN_END else 'test'
+
+
 def _scan_csv_dates():
-    year = 2018
+    """扫描 DATA_DIR 下 YYYYMMDD.csv 的日文件，返回 (dates, date_to_file)。
+
+    日期区间 = [DATA_START, TEST_END]（含两端，天然支持跨年如 2018+2019）。
+    只接受文件名前 8 位为数字的 csv，可自动排除 ssd_failure_tag2.csv 等辅助文件。
+    """
     month_files = sorted([
         f for f in os.listdir(DATA_DIR)
-        if f.endswith('.csv') and f.startswith(str(year))
-        and DATA_MONTH_START <= int(f[4:6]) <= DATA_MONTH_END
+        if f.endswith('.csv') and f[:8].isdigit() and DATA_START <= f[:8] <= TEST_END
     ])
     date_to_file = {}
     dates = []
@@ -295,11 +308,11 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
     n_dates = len(dates)
     # date_str → date_index，用于 failure_time 快速查找
     date_to_di = {d: i for i, d in enumerate(dates)}
-    # 训练/测试可用的窗口结束日索引列表
+    # 训练/测试可用的窗口结束日索引列表（划分逻辑统一由 _split_of 决定）
     train_end_di_list = [i for i, d in enumerate(dates)
-                         if i >= SEQ_LEN - 1 and d <= TRAIN_CUTOFF]
+                         if i >= SEQ_LEN - 1 and _split_of(d) == 'train']
     test_end_di_list = [i for i, d in enumerate(dates)
-                        if i >= SEQ_LEN - 1 and d > TRAIN_CUTOFF]
+                        if i >= SEQ_LEN - 1 and _split_of(d) == 'test']
 
     print(f"  日期数: {n_dates} | 训练窗口池: {len(train_end_di_list)} | 测试窗口池: {len(test_end_di_list)}")
 
@@ -333,7 +346,7 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 end_di = ft_di - l
                 if end_di < SEQ_LEN - 1:
                     break  # 窗口太小
-                if dates[end_di] <= TRAIN_CUTOFF:
+                if _split_of(dates[end_di]) == 'train':
                     w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                     train_pos_entries.append((w_idx, pi, 1.0))
 
@@ -343,7 +356,7 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 end_di = ft_di - l
                 if end_di < SEQ_LEN - 1:
                     break
-                if dates[end_di] > TRAIN_CUTOFF:
+                if _split_of(dates[end_di]) == 'test':
                     w_idx = list(range(end_di - SEQ_LEN + 1, end_di + 1))
                     test_cands.append(w_idx)
             if test_cands:
@@ -405,7 +418,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
             return counter
 
         neighbors = neighbor_map.get(pid, [])[:MAX_NEIGHBORS]
-        neigh_seq_arr = np.zeros((MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM), dtype=np.float32)
+        # 🔧 修复：改为 [T, M, F] 布局（时间优先），避免模型中的 permute 操作
+        neigh_seq_arr = np.zeros((SEQ_LEN, MAX_NEIGHBORS, FEAT_DIM), dtype=np.float32)
         neigh_mask_arr = np.zeros(MAX_NEIGHBORS, dtype=np.bool_)
         for j, npid in enumerate(neighbors):
             nseq = feat_store.get(npid, w_idx)
@@ -413,7 +427,8 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
                 continue
             if np.isnan(nseq).all() or np.all(nseq == 0):
                 continue
-            neigh_seq_arr[j] = nseq
+            # 填充到所有时间步的第 j 个邻居位置
+            neigh_seq_arr[:, j, :] = nseq
             neigh_mask_arr[j] = True
 
         s_tgt[counter] = disk_seq
@@ -447,8 +462,9 @@ def _generate_and_save_samples(dates, disk_info, sampled_pids, neighbor_map,
             tmp_prefix = shard_pattern.format(s)
             s_tmp = np.memmap(tmp_prefix + '.s.tmp', dtype=np.float32, mode='w+',
                               shape=(n_shard, SEQ_LEN, FEAT_DIM))
+            # 🔧 修复：改为 [T, M, F] 布局
             n_tmp = np.memmap(tmp_prefix + '.n.tmp', dtype=np.float32, mode='w+',
-                              shape=(n_shard, MAX_NEIGHBORS, SEQ_LEN, FEAT_DIM))
+                              shape=(n_shard, SEQ_LEN, MAX_NEIGHBORS, FEAT_DIM))
             m_tmp = np.memmap(tmp_prefix + '.m.tmp', dtype=np.bool_, mode='w+',
                               shape=(n_shard, MAX_NEIGHBORS))
             l_tmp = np.memmap(tmp_prefix + '.l.tmp', dtype=np.float32, mode='w+',
@@ -509,7 +525,7 @@ def build_and_save_samples():
     feat_day_files = sorted(glob.glob(os.path.join(PROCESSED_DIR, "feat_day_*.npy")))
 
     if feat_day_files:
-        # 已有 feat_day 文件（由 build_feat_r.py 生成），跳过特征提取
+        # 已有 feat_day 文件，跳过特征提取（若是旧 r_/Z-score 产物请先删除 feat_day_*.npy 再重建，避免误用）
         print(f"  检测到 {len(feat_day_files)} 个已有 feat_day_*.npy 文件，跳过特征提取")
 
         dates, _ = _scan_csv_dates()

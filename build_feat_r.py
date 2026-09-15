@@ -1,4 +1,6 @@
-# build_feat_r.py
+# build_feat_r.py  -- 已废弃(ARCHIVED)
+# ⚠️ 当前 data_utils 已改用 n_ 特征(N_COLS)，由 _extract_and_build_feat() 自动生成 feat_day_*.npy，无需运行本脚本。
+# ⚠️ 若误运行会用 r_ Z-score 结果覆盖 feat_day_*.npy，与 n_ 训练数据不匹配且无报错！
 # r_ 原始值 Z-score 标准化脚本
 # 
 # Pass 1: 按 model 统计 r_ 列的 mean/std (Welford 算法, 只用训练集)
@@ -15,8 +17,8 @@ from collections import defaultdict
 from config import *
 from memory_guard import start_guard
 
-DATA_DIR = "D:/2018Datasets"
-PROCESSED_DIR = "datasets/processed"
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+PROCESSED_DIR = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data"
 
 R_COLS = [f"r_{sid}" for sid in [
     5, 9, 12, 170, 171, 172, 173, 174, 175,
@@ -35,8 +37,7 @@ def main():
 
     csv_files = sorted([
         f for f in os.listdir(DATA_DIR)
-        if f.endswith('.csv') and f.startswith('2018')
-        and DATA_MONTH_START <= int(f[4:6]) <= DATA_MONTH_END
+        if f.endswith('.csv') and f[:8].isdigit() and DATA_START <= f[:8] <= TEST_END
     ])
     dates = [fname[:8] for fname in csv_files]
     date_to_file = {d: os.path.join(DATA_DIR, fname) for d, fname in zip(dates, csv_files)}
@@ -65,7 +66,7 @@ def main():
         stats = {}
         train_count = 0
         for di, date_str in enumerate(dates):
-            if date_str > TRAIN_CUTOFF:
+            if date_str > TRAIN_END:
                 break
             fpath = date_to_file[date_str]
             try:

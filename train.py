@@ -1,8 +1,4 @@
-# train.py
-# 入口：分片加载训练集 → 增量训练模型 → 每 epoch 后直接评估测试集
-# 特点：每 epoch 训练完立即评估全部测试分片，打印 P/R/F1，
-#       训练结束后自动恢复到 F1 最高的 epoch 的模型
-
+# -*- coding: utf-8 -*-
 import os
 import json
 import torch
@@ -214,7 +210,7 @@ def train():
     scaler = torch.cuda.amp.GradScaler() if (USE_AMP and DEVICE == "cuda") else None
 
     if pos_weight is not None:
-        print(f"  使用 pos_weight={POS_WEIGHT} (补偿训练集正负比约1:11)")
+        print(f"  使用 pos_weight={POS_WEIGHT} ")
 
     # 4. 训练：每 epoch 后评估测试集，记录指标
     print(f"\n[2] 训练 ({EPOCHS} epochs × {n_train_shards} 分片) | "

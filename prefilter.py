@@ -7,15 +7,13 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from tqdm import tqdm
-from config import DATA_MONTH_START, DATA_MONTH_END
+from config import DATA_START, TRAIN_END, TEST_END
 
 # ========== 参数 ==========
-DATA_DIR = "D:/2018Datasets"
-OUTPUT_DIR = "datasets/processed"
-LOCATION_FILE = "D:/2018Datasets/location_info_of_ssd.csv"
-YEAR = 2018
-MONTH_START = DATA_MONTH_START
-MONTH_END = DATA_MONTH_END
+DATA_DIR = "/mnt/newdisk/shujie/dataset/alibaba_ssd"
+OUTPUT_DIR = "/mnt/newdisk/qhmiao/disk_failure_prediction/processed_data"
+LOCATION_FILE = "/mnt/newdisk/qhmiao/datasets/location_info_of_ssd.csv"
+# （不再需要 YEAR / 月份副本：统一用 config 的 DATA_START / TRAIN_END / TEST_END）
 
 # SMART 特征列名
 SMART_IDS = [
@@ -55,12 +53,11 @@ def main():
     print(f"  位置信息覆盖 {len(disk_loc_map):,} 个 (disk_id, model) 组合")
     print(f"  唯一 node_id 数: {loc_df['node_id'].nunique():,}")
 
-    # ====== 第②步：扫描多月份CSV，收集所有 (disk_id, model) ======
-    print(f"\n[2/5] 扫描{YEAR}年{MONTH_START}~{MONTH_END}月CSV...")
+    # ====== 第②步：扫描 CSV（DATA_START ~ TEST_END），收集所有 (disk_id, model) ======
+    print(f"\n[2/5] 扫描 CSV ({DATA_START} ~ {TEST_END})...")
     month_files = sorted([
         f for f in os.listdir(DATA_DIR)
-        if f.endswith('.csv') and f.startswith(str(YEAR))
-        and MONTH_START <= int(f[4:6]) <= MONTH_END
+        if f.endswith('.csv') and f[:8].isdigit() and DATA_START <= f[:8] <= TEST_END
     ])
     print(f"  找到 {len(month_files)} 个文件")
 
@@ -89,7 +86,7 @@ def main():
 
     n_failure_pairs = sum(1 for pair in all_disk_model_pairs if pair in failure_map)
     print(f"  故障标签 (disk_id, model) 对: {len(failure_map):,}")
-    print(f"  其中在MONTH_START-MONTH_END中出现的: {n_failure_pairs:,}")
+    print(f"  其中在数据日期范围 {DATA_START}~{TEST_END} 中出现的: {n_failure_pairs:,}")
 ###############################################################################
     # ====== 第④步：筛选能匹配到位置信息的 (disk_id, model) 对 ======
     print("\n[4/5] 筛选 (disk_id, model) 对（保留全量，训练时再下采样）...")
